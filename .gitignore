@@ -1,0 +1,19 @@
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Java and Gradle build outputs
+.gradle/
+build/
+out/
+*.class
+
+# Python experiment artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Rust build artifacts
+target/
