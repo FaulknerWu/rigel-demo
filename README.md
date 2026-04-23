@@ -1,33 +1,11 @@
-# Rigel: 面向 AI Agent 的可解释代码语义检索系统
+# Rigel Demo
+本项目 (`rigel-demo`) 是为了快速开发与展示从 Rigel 主项目分离出来的 demo 仓库，后期预计废弃。
 
-Rigel 是一个基础设施项目，旨在帮助 AI Coding Agent 在处理大型代码仓库时，更加精准、快速地完成代码的阅读与语义理解。本项目通过梳理离散的代码实体与架构关系，将其结构化并组织为代码知识图谱，同时提供标准的检索能力，以确保 AI Agent 能够在完整的上下文中执行推演与生成任务。
+## 演示技术栈与依赖
 
-## 项目愿景
+*   **核心环境**: [Python](https://www.python.org/)
+*   **语法树解析**: [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) (针对细粒度 AST 和实体剥离)
+*   **LSP 封装**: [multilspy](https://github.com/microsoft/multilspy) (针对跨文件分析)
 
-在分析大型代码仓库的常规实践中，单纯依赖代码切片与文本降维（向量化存储）输入给大语言模型，往往会因上下文截断而导致模型产生推断“幻觉”或引用错误。Rigel 的核心目标是：**构建一套机制，将代码客观存在的结构拓扑与逻辑依赖，以高保真且高效的方式传递给大语言模型。**
-
-Rigel 主仓库的主线规划技术路径包括：
-- **高精度 AST 提取**：利用 Tree-sitter 建立源码结构骨架，当前 Rust 端已接入 `tree-sitter` 与 `tree-sitter-java` 依赖，并保留 Java 解析入口占位。
-- **深层语义网络构建**：以跨文件符号关系抽取为后续重点方向；当前仓库仅保留设计文档与实验环境，尚未在 Rust 主链路中落地完整语义提取。
-- **图检索与 MCP 服务化**：目标是基于 [FalkorDB](https://falkordb.com/) 和 MCP 提供检索服务；当前 Rust 端已建立模块骨架，但图存储、LLM 与 MCP 仍处于占位实现阶段。
-
-## 主线技术栈与依赖
-
-*   **核心开发语言**: [Rust](https://www.rust-lang.org/)（保障复杂语法树遍历及内存安全性）
-*   **语法树解析**: [Tree-sitter](https://tree-sitter.github.io/tree-sitter/)
-*   **底层图数据库**: [FalkorDB](https://falkordb.com/)
-*   **模型交互协议**: MCP Server
-
-> [!IMPORTANT] 
-> 项目目前处于迭代阶段，各项规划与功能设计随时可能发生变动。**请注意：系统中只有被正式收录进入 `docs/adr/` 目录下的架构决策记录 (ADR) 才是基准**。其他设计及其余选型可能随迭代演进而更新。
-
-## 仓库说明
-
-当前仓库是从 Rigel 的快速原型演示分支独立拆分出的 demo 仓库，用于承载对外展示、快速验证与纯 Python 原型开发。
-
-> [!WARNING]
-> 本仓库当前采用全 Python 技术栈，并承载演示用 Web 页面。这里的实现仅服务于阶段性的原型验证与展示，不作为 Rigel 主线长期演进基线。
-
-Rigel 主仓库仍维护正式的架构决策与主线规划，见：
-
+Rigel 主仓库正式的架构决策与主线规划见：
 - GitHub: <https://github.com/FaulknerWu/Rigel>
