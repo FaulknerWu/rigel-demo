@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rigel_demo.graph_ir import EdgeType, GraphIR, GraphNode, JsonObject, NodeType
+from rigel_demo.core.graph_ir import EdgeType, GraphIR, GraphNode, JsonObject, NodeType
 from rigel_demo.java.source_utils import normalize_path, simple_name
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from rigel_demo.graph_ir import (
+from rigel_demo.core.graph_ir import (
     Anchor,
     EdgeType,
     Entity,
@@ -17,7 +17,7 @@ from rigel_demo.graph_ir import (
     Repository,
     Summary,
 )
-from rigel_demo.falkordb_store import FalkorDBConfig, FalkorDBStore
+from rigel_demo.storage.falkordb_store import FalkorDBConfig, FalkorDBStore
 
 
 _CLI_EXPORTS = {
@@ -71,7 +71,7 @@ def __getattr__(name: str) -> Any:
         return value
 
     if name in _INDEXER_EXPORTS:
-        from rigel_demo import repository_indexer
+        from rigel_demo.indexing import repository_indexer
 
         value = getattr(repository_indexer, name)
         globals()[name] = value

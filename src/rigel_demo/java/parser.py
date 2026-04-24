@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from tree_sitter import Node, Parser
 
-from rigel_demo.graph_ir import Anchor, EdgeType, Entity, File, GraphEdge, GraphIR, Module, Repository
+from rigel_demo.core.graph_ir import Anchor, EdgeType, Entity, File, GraphEdge, GraphIR, Module, Repository
 from rigel_demo.java.language import BODY_NODE_KINDS, JAVA_LANGUAGE, METHOD_DECLARATION_KINDS, TREE_SITTER_PROVENANCE, TYPE_DECLARATION_KINDS
 from rigel_demo.java.requests import JavaParseRequest
 from rigel_demo.java.source_utils import node_text, normalize_path, read_package_name

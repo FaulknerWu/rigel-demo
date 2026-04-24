@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rigel_demo.graph_ir import GraphEdge, GraphIR, GraphNode, JsonObject, JsonValue
+from rigel_demo.core.graph_ir import GraphEdge, GraphIR, GraphNode, JsonObject, JsonValue
 
 
 RIGEL_NODE_LABEL = "RigelNode"

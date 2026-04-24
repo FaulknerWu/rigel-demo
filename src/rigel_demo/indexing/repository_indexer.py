@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from rigel_demo.graph_ir import EdgeType, GraphEdge, GraphIR, Module, Repository
+from rigel_demo.core.graph_ir import EdgeType, GraphEdge, GraphIR, Module, Repository
 from rigel_demo.java import JavaParseRequest, JavaSemanticEdgeRequest, enrich_java_semantic_edges, parse_java_file
 from rigel_demo.java.requests import DEFAULT_MODULE_ECOSYSTEM, DEFAULT_MODULE_NAME, DEFAULT_ZONE
 

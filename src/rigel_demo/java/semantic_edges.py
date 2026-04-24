@@ -12,7 +12,7 @@ from multilspy.multilspy_config import MultilspyConfig
 from multilspy.multilspy_logger import MultilspyLogger
 from tree_sitter import Node, Parser
 
-from rigel_demo.graph_ir import EdgeType, GraphEdge, GraphIR, JsonObject
+from rigel_demo.core.graph_ir import EdgeType, GraphEdge, GraphIR, JsonObject
 from rigel_demo.java.graph_index import EntityView, GraphIndex
 from rigel_demo.java.language import (
     DECLARATION_NODE_KINDS,

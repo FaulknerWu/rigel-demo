@@ -41,8 +41,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 def init_repository(repository_path: Path | None = None) -> InitResult:
     """在目标仓库创建 Rigel 本地工作目录。"""
 
-    from rigel_demo.falkordb_store import FalkorDBConfig, FalkorDBStore
-    from rigel_demo.repository_indexer import index_repository
+    from rigel_demo.storage.falkordb_store import FalkorDBConfig, FalkorDBStore
+    from rigel_demo.indexing.repository_indexer import index_repository
 
     resolved_repository_path = (repository_path or Path.cwd()).resolve()
     workspace_path = resolved_repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
