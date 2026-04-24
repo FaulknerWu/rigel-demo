@@ -13,14 +13,16 @@ from rigel_demo.graph_ir import (
     Repository,
     Summary,
 )
-from rigel_demo.java_parser import JavaParseRequest, parse_java_file
-from rigel_demo.java_semantic_edges import JavaSemanticEdgeRequest, enrich_java_semantic_edges
+from rigel_demo.java import JavaParseRequest, JavaSemanticEdgeRequest, enrich_java_semantic_edges, parse_java_file
+from rigel_demo.falkordb_store import FalkorDBConfig, FalkorDBStore
 
 __all__ = [
     "Anchor",
     "EdgeType",
     "Entity",
     "File",
+    "FalkorDBConfig",
+    "FalkorDBStore",
     "GraphEdge",
     "GraphIR",
     "GraphNode",

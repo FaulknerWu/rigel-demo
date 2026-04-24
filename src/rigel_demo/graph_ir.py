@@ -1,8 +1,4 @@
 """Rigel 图谱中间表示。
-
-本模块只定义跨语言稳定的图模型外壳，不承载具体语言的解析规则。
-解析器应把语言相关细节放进节点属性或边属性，保证下游存储、检索与展示
-可以围绕同一套节点/边类型演进。
 """
 
 from __future__ import annotations
@@ -46,13 +42,6 @@ class GraphNode:
     type: NodeType
     properties: JsonObject
 
-    def to_json(self) -> JsonObject:
-        return {
-            "id": self.id,
-            "type": self.type.value,
-            "properties": self.properties,
-        }
-
 
 @dataclass(frozen=True, slots=True)
 class Repository:
@@ -91,8 +80,7 @@ class Module:
 class File:
     """源码文件节点。
 
-    content_hash 记录文件原文哈希，用来判断文件级变更；实体级稳定性由 Entity
-    的 semantic_hash 单独描述，二者不能混用。
+    content_hash 记录文件原文哈希，用来判断文件级变更
     """
 
     file_id: str
@@ -113,8 +101,6 @@ class File:
 @dataclass(frozen=True, slots=True)
 class Entity:
     """代码实体节点，例如类型、方法、字段等可检索的语义单元。
-
-    kind_norm 面向跨语言消费方，kind_raw 保留解析器原始类型，便于调试与回溯。
     """
 
     entity_id: str
@@ -175,9 +161,6 @@ class Summary:
 @dataclass(frozen=True, slots=True)
 class GraphEdge:
     """图谱边。
-
-    关系语义细节必须写入 properties，例如 kind、provenance、confidence、role。
-    顶层 type 只保留六类稳定关系族，避免把图模型绑定到特定语言或数据库。
     """
 
     id: str
@@ -220,16 +203,6 @@ class GraphEdge:
             properties=edge_properties,
         )
 
-    def to_json(self) -> JsonObject:
-        return {
-            "id": self.id,
-            "type": self.type.value,
-            "source_id": self.source_id,
-            "target_id": self.target_id,
-            "properties": self.properties,
-        }
-
-
 @dataclass(slots=True)
 class GraphIR:
     """图谱中间表示根对象。
@@ -245,13 +218,6 @@ class GraphIR:
 
     def add_edge(self, edge: GraphEdge) -> None:
         self.edges.append(edge)
-
-    def to_json(self) -> JsonObject:
-        return {
-            "schema_version": self.schema_version,
-            "nodes": [node.to_json() for node in self.nodes],
-            "edges": [edge.to_json() for edge in self.edges],
-        }
 
 
 def _dataclass_properties(model: object) -> JsonObject:

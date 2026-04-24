@@ -1,68 +1,19 @@
-"""基于 Tree-sitter 的 Java 物理结构解析器。
-"""
+"""基于 Tree-sitter 的 Java 物理结构解析器。"""
 
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
 
-import tree_sitter_java
-from tree_sitter import Language, Node, Parser
+from tree_sitter import Node, Parser
 
 from rigel_demo.graph_ir import Anchor, EdgeType, Entity, File, GraphEdge, GraphIR, Module, Repository
+from rigel_demo.java.language import BODY_NODE_KINDS, JAVA_LANGUAGE, METHOD_DECLARATION_KINDS, TREE_SITTER_PROVENANCE, TYPE_DECLARATION_KINDS
+from rigel_demo.java.requests import JavaParseRequest
+from rigel_demo.java.source_utils import node_text, normalize_path, read_package_name
 
-
-JAVA_LANGUAGE = Language(tree_sitter_java.language())
-
-# 这些常量会进入图谱属性或 ID，集中定义可避免解析器和测试之间出现隐式约定。
-TREE_SITTER_PROVENANCE = "tree-sitter"
 PHYSICAL_MEMBERSHIP_KIND = "physical-membership"
-DEFAULT_MODULE_NAME = "root"
-DEFAULT_MODULE_ECOSYSTEM = "maven"
-DEFAULT_ZONE = "prod"
 HASH_PREFIX = "sha256:"
-
-TYPE_DECLARATION_KINDS = {
-    "annotation_type_declaration": "interface",
-    "class_declaration": "class",
-    "enum_declaration": "enum",
-    "interface_declaration": "interface",
-    "record_declaration": "class",
-}
-
-# Tree-sitter Java 会把构造函数、普通方法、注解元素拆成不同节点；图谱层先归一为 method。
-METHOD_DECLARATION_KINDS = {
-    "annotation_type_element_declaration",
-    "compact_constructor_declaration",
-    "constructor_declaration",
-    "method_declaration",
-}
-
-# 只有进入这些节点时才继续向下寻找子实体，避免把表达式内部的普通标识符误识别为实体。
-BODY_NODE_KINDS = {
-    "annotation_type_body",
-    "block",
-    "class_body",
-    "constructor_body",
-    "enum_body",
-    "interface_body",
-}
-
-
-@dataclass(frozen=True, slots=True)
-class JavaParseRequest:
-    """Java 文件解析请求。
-
-    请求对象显式携带仓库和模块上下文，因为单文件源码本身无法可靠反推出
-    所属模块、生态和运行分区。
-    """
-
-    repository_name: str
-    module_name: str = DEFAULT_MODULE_NAME
-    module_root_path: str = "."
-    module_ecosystem: str = DEFAULT_MODULE_ECOSYSTEM
-    zone: str = DEFAULT_ZONE
 
 
 @dataclass(slots=True)
@@ -91,7 +42,7 @@ def parse_java_file(
     parser = Parser()
     parser.language = JAVA_LANGUAGE
     syntax_tree = parser.parse(source_bytes)
-    package_name = _read_package_name(syntax_tree.root_node, source_bytes)
+    package_name = read_package_name(syntax_tree.root_node, source_bytes)
 
     repository = Repository(repo_id=f"repo:{request.repository_name}", name=request.repository_name)
     module_id = f"module:{request.repository_name}:{request.module_name}"
@@ -102,7 +53,7 @@ def parse_java_file(
         ecosystem=request.module_ecosystem,
         zone=request.zone,
     )
-    normalized_path = _normalize_path(relative_path)
+    normalized_path = normalize_path(relative_path)
     file_model = File(
         file_id=f"file:{request.repository_name}:{normalized_path}",
         relative_path=normalized_path,
@@ -184,7 +135,7 @@ def _create_type_record(
     """创建类型实体记录，并递归收集其直接成员。"""
 
     name_node = _required_name_node(node)
-    display_name = _node_text(name_node, source_bytes)
+    display_name = node_text(name_node, source_bytes)
     qualified_name = _join_qualified_name(parent_qualified_name, display_name)
     body_node = _first_child_with_type(node, BODY_NODE_KINDS)
     record = _EntityRecord(
@@ -221,13 +172,10 @@ def _create_method_record(
     parent_qualified_name: str,
 ) -> _EntityRecord:
     """创建方法实体记录。
-
-    qualified_name 中包含参数类型签名，目的是让 Java 重载方法在同一父级下保持
-    稳定可区分。
     """
 
     name_node = _required_name_node(node)
-    display_name = _node_text(name_node, source_bytes)
+    display_name = node_text(name_node, source_bytes)
     qualified_name = f"{parent_qualified_name}#{display_name}{_parameter_signature(node, source_bytes)}"
     body_node = _first_child_with_type(node, BODY_NODE_KINDS)
     record = _EntityRecord(
@@ -264,9 +212,6 @@ def _create_field_records(
     parent_qualified_name: str,
 ) -> list[_EntityRecord]:
     """从字段声明中拆分出每一个变量实体。
-
-    Java 允许 `int a, b` 这种多变量声明；图谱检索通常关心单个字段，因此这里
-    保留共享声明锚点，同时为每个 declarator 生成独立实体。
     """
 
     records: list[_EntityRecord] = []
@@ -274,7 +219,7 @@ def _create_field_records(
         if declarator.type != "variable_declarator":
             continue
         name_node = _required_name_node(declarator)
-        display_name = _node_text(name_node, source_bytes)
+        display_name = node_text(name_node, source_bytes)
         qualified_name = f"{parent_qualified_name}#{display_name}"
         records.append(
             _EntityRecord(
@@ -378,18 +323,6 @@ def _add_anchor(graph: GraphIR, owner_id: str, role: str, node: Node) -> None:
     )
 
 
-def _read_package_name(root_node: Node, source_bytes: bytes) -> str:
-    """读取 Java package 声明；默认包返回空字符串。"""
-
-    for child in root_node.named_children:
-        if child.type != "package_declaration":
-            continue
-        for package_child in child.named_children:
-            if package_child.type in {"identifier", "scoped_identifier"}:
-                return _node_text(package_child, source_bytes)
-    return ""
-
-
 def _parameter_signature(node: Node, source_bytes: bytes) -> str:
     """生成方法参数类型签名。"""
 
@@ -405,7 +338,7 @@ def _parameter_type(parameter_node: Node, source_bytes: bytes) -> str:
 
     for child in parameter_node.named_children:
         if child.type != "identifier":
-            return _node_text(child, source_bytes)
+            return node_text(child, source_bytes)
     return ""
 
 
@@ -424,7 +357,7 @@ def _semantic_tokens(node: Node, source_bytes: bytes) -> list[str]:
     if node.is_extra or node.type in {"line_comment", "block_comment"}:
         return []
     if node.child_count == 0:
-        text = _node_text(node, source_bytes).strip()
+        text = node_text(node, source_bytes).strip()
         return [text] if text else []
     tokens: list[str] = []
     for child in node.children:
@@ -448,16 +381,8 @@ def _required_name_node(node: Node) -> Node:
     return identifier
 
 
-def _node_text(node: Node, source_bytes: bytes) -> str:
-    return source_bytes[node.start_byte : node.end_byte].decode("utf-8")
-
-
 def _join_qualified_name(prefix: str, name: str) -> str:
     return f"{prefix}.{name}" if prefix else name
-
-
-def _normalize_path(path: str) -> str:
-    return PurePosixPath(path).as_posix()
 
 
 def _content_hash(content: bytes) -> str:
