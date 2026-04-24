@@ -1,0 +1,127 @@
+"""仓库级代码图谱索引流程。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from rigel_demo.graph_ir import EdgeType, GraphEdge, GraphIR, Module, Repository
+from rigel_demo.java import JavaParseRequest, JavaSemanticEdgeRequest, enrich_java_semantic_edges, parse_java_file
+from rigel_demo.java.requests import DEFAULT_MODULE_ECOSYSTEM, DEFAULT_MODULE_NAME, DEFAULT_ZONE
+
+
+IGNORED_DIRECTORY_NAMES = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".rigel",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "venv",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryIndexResult:
+    """仓库索引结果。"""
+
+    graph: GraphIR
+    indexed_file_count: int
+
+
+class EmptyJavaLspClient:
+    """禁用 LSP 时的空客户端，让语义补全退回 Tree-sitter 名称匹配。"""
+
+    def request_definition(self, file_path: str, line: int, column: int) -> list[dict[str, object]]:
+        return []
+
+    def request_references(self, file_path: str, line: int, column: int) -> list[dict[str, object]]:
+        return []
+
+    def request_hover(self, relative_file_path: str, line: int, column: int) -> dict[str, object] | None:
+        return None
+
+
+def index_repository(repository_path: Path) -> RepositoryIndexResult:
+    """扫描仓库源码并构建可写入 FalkorDBLite 的图谱。"""
+
+    resolved_repository_path = repository_path.resolve()
+    repository_name = resolved_repository_path.name
+    request = JavaParseRequest(repository_name=repository_name)
+    graph = _base_graph(request)
+    indexed_file_count = 0
+
+    for source_path in _iter_java_files(resolved_repository_path):
+        relative_path = source_path.relative_to(resolved_repository_path).as_posix()
+        file_graph = parse_java_file(source_path.read_bytes(), relative_path, request=request)
+        _merge_graph(graph, file_graph)
+        indexed_file_count += 1
+
+    if indexed_file_count > 0:
+        enrich_java_semantic_edges(
+            graph,
+            request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
+            lsp_client=EmptyJavaLspClient(),
+        )
+
+    return RepositoryIndexResult(graph=graph, indexed_file_count=indexed_file_count)
+
+
+def _base_graph(request: JavaParseRequest) -> GraphIR:
+    graph = GraphIR()
+    repository = Repository(repo_id=f"repo:{request.repository_name}", name=request.repository_name)
+    module = Module(
+        module_id=f"module:{request.repository_name}:{DEFAULT_MODULE_NAME}",
+        name=DEFAULT_MODULE_NAME,
+        root_path=".",
+        ecosystem=DEFAULT_MODULE_ECOSYSTEM,
+        zone=DEFAULT_ZONE,
+    )
+    graph.add_node(repository)
+    graph.add_node(module)
+    graph.add_edge(
+        GraphEdge.create(
+            EdgeType.CONTAINS,
+            repository.repo_id,
+            module.module_id,
+            kind="physical-membership",
+        )
+    )
+    return graph
+
+
+def _iter_java_files(repository_path: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in repository_path.rglob("*.java")
+        if path.is_file() and not _is_ignored_path(path.relative_to(repository_path))
+    )
+
+
+def _is_ignored_path(relative_path: Path) -> bool:
+    return any(part in IGNORED_DIRECTORY_NAMES for part in relative_path.parts)
+
+
+def _merge_graph(target: GraphIR, source: GraphIR) -> None:
+    existing_node_ids = {node.id for node in target.nodes}
+    existing_edge_ids = {edge.id for edge in target.edges}
+
+    for node in source.nodes:
+        if node.id in existing_node_ids:
+            continue
+        target.nodes.append(node)
+        existing_node_ids.add(node.id)
+
+    for edge in source.edges:
+        if edge.id in existing_edge_ids:
+            continue
+        target.edges.append(edge)
+        existing_edge_ids.add(edge.id)
