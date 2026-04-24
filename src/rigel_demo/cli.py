@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import webbrowser
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -14,6 +16,7 @@ from typing import Sequence
 RIGEL_WORKSPACE_DIRECTORY_NAME = ".rigel"
 FALKORDB_DATABASE_FILE_NAME = "falkordb.db"
 WORKSPACE_STATE_FILE_NAME = "rigel.json"
+WEB_STATIC_DIRECTORY_NAME = "web/static"
 DEFAULT_GRAPH_NAME = "rigel"
 
 
@@ -125,22 +128,98 @@ def _handle_web_command(args: argparse.Namespace) -> int:
     from rigel_demo.web.app import create_app
 
     repository_path = Path.cwd().resolve()
+    workspace_path = repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
     database_path = repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME / FALKORDB_DATABASE_FILE_NAME
     if not database_path.exists():
         print(f"未找到图数据库: {database_path}")
         print("请先在目标仓库执行 rigel init。")
         return 1
 
+    frontend_result = build_frontend(workspace_path / WEB_STATIC_DIRECTORY_NAME)
+    if not frontend_result.success:
+        print(frontend_result.message)
+        return 1
+
     url = f"http://{args.host}:{args.port}"
     print("Rigel Web 演示后端已启动", flush=True)
     print(f"仓库目录: {repository_path}", flush=True)
     print(f"图数据库: {database_path}", flush=True)
+    print(f"前端目录: {frontend_result.static_path}", flush=True)
     print(f"访问地址: {url}", flush=True)
     if not args.no_open:
         webbrowser.open(url)
 
     uvicorn.run(create_app(repository_path), host=args.host, port=args.port)
     return 0
+
+
+@dataclass(frozen=True, slots=True)
+class FrontendBuildResult:
+    """前端构建结果。"""
+
+    success: bool
+    static_path: Path
+    message: str = ""
+
+
+def build_frontend(static_path: Path) -> FrontendBuildResult:
+    """把内置前端构建到当前仓库 `.rigel` 工作目录。"""
+
+    frontend_path = Path(__file__).resolve().parent / "web" / "frontend"
+    package_json_path = frontend_path / "package.json"
+    if not package_json_path.exists():
+        return FrontendBuildResult(
+            success=False,
+            static_path=static_path,
+            message=f"未找到前端源码目录: {frontend_path}",
+        )
+
+    npm_path = shutil.which("npm")
+    if npm_path is None:
+        return FrontendBuildResult(
+            success=False,
+            static_path=static_path,
+            message="未找到 npm，无法构建 Rigel Web 前端。",
+        )
+
+    node_modules_path = frontend_path / "node_modules"
+    if not node_modules_path.exists():
+        install_result = subprocess.run(
+            [npm_path, "install"],
+            cwd=frontend_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if install_result.returncode != 0:
+            return FrontendBuildResult(
+                success=False,
+                static_path=static_path,
+                message=_frontend_command_error("前端依赖安装失败", install_result),
+            )
+
+    build_result = subprocess.run(
+        [npm_path, "run", "build", "--", "--outDir", str(static_path), "--emptyOutDir"],
+        cwd=frontend_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if build_result.returncode != 0:
+        return FrontendBuildResult(
+            success=False,
+            static_path=static_path,
+            message=_frontend_command_error("前端构建失败", build_result),
+        )
+
+    return FrontendBuildResult(success=True, static_path=static_path)
+
+
+def _frontend_command_error(title: str, result: subprocess.CompletedProcess[str]) -> str:
+    output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
+    if not output:
+        return title
+    return f"{title}:\n{output}"
 
 
 def _write_workspace_state(state_path: Path, result: InitResult) -> None:

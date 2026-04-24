@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from rigel_demo.cli import (
     DEFAULT_GRAPH_NAME,
@@ -19,6 +20,9 @@ from rigel_demo.storage.falkordb_store import FalkorDBConfig, FalkorDBStore
 
 DEFAULT_GRAPH_LIMIT = 500
 DEFAULT_SEARCH_LIMIT = 50
+VISIBLE_NODE_TYPES = ("Repository", "Module", "File", "Entity")
+VISIBLE_EDGE_TYPES = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES")
+WEB_STATIC_DIRECTORY_NAME = "web/static"
 
 
 def create_app(repository_path: Path | None = None) -> FastAPI:
@@ -28,10 +32,16 @@ def create_app(repository_path: Path | None = None) -> FastAPI:
     workspace_path = resolved_repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
     database_path = workspace_path / FALKORDB_DATABASE_FILE_NAME
     state_path = workspace_path / WORKSPACE_STATE_FILE_NAME
+    static_frontend_path = workspace_path / WEB_STATIC_DIRECTORY_NAME
+    static_assets_path = static_frontend_path / "assets"
+    static_index_path = static_frontend_path / "index.html"
     graph_name = _read_graph_name(state_path)
     graph_reader = RigelGraphReader(database_path=database_path, graph_name=graph_name)
 
     app = FastAPI(title="Rigel Demo", version="0.1.0")
+
+    if static_assets_path.exists():
+        app.mount("/assets", StaticFiles(directory=static_assets_path), name="assets")
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
@@ -72,9 +82,12 @@ def create_app(repository_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="limit 必须大于 0")
         return {"status": "success", "nodes": graph_reader.search(q.strip(), limit=limit)}
 
-    @app.get("/")
-    def index() -> HTMLResponse:
-        """前端未实现前提供最小占位入口。"""
+    @app.get("/", response_model=None)
+    def index() -> FileResponse | HTMLResponse:
+        """返回已构建前端；未构建时提供最小占位入口。"""
+
+        if static_index_path.exists():
+            return FileResponse(static_index_path)
 
         return HTMLResponse(_placeholder_html())
 
@@ -89,16 +102,37 @@ class RigelGraphReader:
         self._graph_name = graph_name
 
     def summary(self) -> dict[str, object]:
-        """统计节点、边与节点类型分布。"""
+        """统计默认可视化语义图谱的节点、边与节点类型分布。"""
 
-        node_count = self._scalar_query("MATCH (node:RigelNode) RETURN count(node)")
-        edge_count = self._scalar_query("MATCH (:RigelNode)-[edge]->(:RigelNode) RETURN count(edge)")
+        node_count = self._scalar_query(
+            """
+            MATCH (node:RigelNode)
+            WHERE node.rigel_type IN $visible_node_types
+            RETURN count(node)
+            """,
+            {"visible_node_types": list(VISIBLE_NODE_TYPES)},
+        )
+        edge_count = self._scalar_query(
+            """
+            MATCH (source:RigelNode)-[edge]->(target:RigelNode)
+            WHERE source.rigel_type IN $visible_node_types
+              AND target.rigel_type IN $visible_node_types
+              AND type(edge) IN $visible_edge_types
+            RETURN count(edge)
+            """,
+            {
+                "visible_node_types": list(VISIBLE_NODE_TYPES),
+                "visible_edge_types": list(VISIBLE_EDGE_TYPES),
+            },
+        )
         type_rows = self._query(
             """
             MATCH (node:RigelNode)
+            WHERE node.rigel_type IN $visible_node_types
             RETURN node.rigel_type, count(node)
             ORDER BY count(node) DESC
-            """
+            """,
+            {"visible_node_types": list(VISIBLE_NODE_TYPES)},
         )
         return {
             "node_count": node_count,
@@ -110,15 +144,16 @@ class RigelGraphReader:
         }
 
     def graph(self, *, limit: int) -> dict[str, list[dict[str, object]]]:
-        """读取一批节点和这些节点之间的边。"""
+        """读取默认可视化语义节点和这些节点之间的语义边。"""
 
         node_rows = self._query(
             """
             MATCH (node:RigelNode)
+            WHERE node.rigel_type IN $visible_node_types
             RETURN labels(node), node.id, properties(node)
             LIMIT $limit
             """,
-            {"limit": limit},
+            {"visible_node_types": list(VISIBLE_NODE_TYPES), "limit": limit},
         )
         nodes = [_format_node(labels, node_id, properties) for labels, node_id, properties in node_rows]
         node_ids = [str(node["id"]) for node in nodes]
@@ -129,10 +164,15 @@ class RigelGraphReader:
             """
             MATCH (source:RigelNode)-[edge]->(target:RigelNode)
             WHERE source.id IN $node_ids AND target.id IN $node_ids
+              AND type(edge) IN $visible_edge_types
             RETURN source.id, target.id, type(edge), properties(edge)
             LIMIT $limit
             """,
-            {"node_ids": node_ids, "limit": limit * 2},
+            {
+                "node_ids": node_ids,
+                "visible_edge_types": list(VISIBLE_EDGE_TYPES),
+                "limit": limit * 2,
+            },
         )
         edges = [_format_edge(source_id, target_id, edge_type, properties) for source_id, target_id, edge_type, properties in edge_rows]
         return {"nodes": nodes, "edges": edges}
@@ -144,20 +184,23 @@ class RigelGraphReader:
         rows = self._query(
             """
             MATCH (node:RigelNode)
-            WHERE toLower(coalesce(node.display_name, '')) CONTAINS $query
-               OR toLower(coalesce(node.qualified_name, '')) CONTAINS $query
-               OR toLower(coalesce(node.relative_path, '')) CONTAINS $query
-               OR toLower(coalesce(node.name, '')) CONTAINS $query
-               OR toLower(coalesce(node.id, '')) CONTAINS $query
+            WHERE node.rigel_type IN $visible_node_types
+              AND (
+                toLower(coalesce(node.display_name, '')) CONTAINS $query
+                OR toLower(coalesce(node.qualified_name, '')) CONTAINS $query
+                OR toLower(coalesce(node.relative_path, '')) CONTAINS $query
+                OR toLower(coalesce(node.name, '')) CONTAINS $query
+                OR toLower(coalesce(node.id, '')) CONTAINS $query
+              )
             RETURN labels(node), node.id, properties(node)
             LIMIT $limit
             """,
-            {"query": normalized_query, "limit": limit},
+            {"visible_node_types": list(VISIBLE_NODE_TYPES), "query": normalized_query, "limit": limit},
         )
         return [_format_node(labels, node_id, properties) for labels, node_id, properties in rows]
 
-    def _scalar_query(self, query: str) -> int:
-        rows = self._query(query)
+    def _scalar_query(self, query: str, parameters: Mapping[str, object] | None = None) -> int:
+        rows = self._query(query, parameters)
         if not rows:
             return 0
         return int(rows[0][0])
