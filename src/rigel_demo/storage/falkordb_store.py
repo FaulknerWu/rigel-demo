@@ -27,6 +27,12 @@ class FalkorDBStore:
     def __init__(self, graph: Any) -> None:
         self._graph = graph
 
+    @property
+    def graph(self) -> Any:
+        """暴露底层 FalkorDB 图对象，供只读查询复用。"""
+
+        return self._graph
+
     @classmethod
     def connect(cls, config: FalkorDBConfig) -> "FalkorDBStore":
         """使用 FalkorDBLite 创建本地图谱写入器。"""

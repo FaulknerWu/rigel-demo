@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import webbrowser
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -89,6 +90,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     init_parser.set_defaults(command_handler=_handle_init_command)
 
+    web_parser = subparsers.add_parser(
+        "web",
+        help="启动当前仓库的 Rigel Web 演示后端。",
+        description="读取当前目录 .rigel/falkordb.db，启动 Web 演示后端并打开浏览器。",
+    )
+    web_parser.add_argument("--host", default="127.0.0.1", help="Web 服务监听地址。")
+    web_parser.add_argument("--port", default=5000, type=int, help="Web 服务监听端口。")
+    web_parser.add_argument("--no-open", action="store_true", help="只启动服务，不自动打开浏览器。")
+    web_parser.set_defaults(command_handler=_handle_web_command)
+
     return parser
 
 
@@ -103,6 +114,32 @@ def _handle_init_command(_args: argparse.Namespace) -> int:
     print(f"索引文件: {result.indexed_file_count}")
     print(f"图谱节点: {result.graph_node_count}")
     print(f"图谱边: {result.graph_edge_count}")
+    return 0
+
+
+def _handle_web_command(args: argparse.Namespace) -> int:
+    """处理 web 命令。"""
+
+    import uvicorn
+
+    from rigel_demo.web.app import create_app
+
+    repository_path = Path.cwd().resolve()
+    database_path = repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME / FALKORDB_DATABASE_FILE_NAME
+    if not database_path.exists():
+        print(f"未找到图数据库: {database_path}")
+        print("请先在目标仓库执行 rigel init。")
+        return 1
+
+    url = f"http://{args.host}:{args.port}"
+    print("Rigel Web 演示后端已启动", flush=True)
+    print(f"仓库目录: {repository_path}", flush=True)
+    print(f"图数据库: {database_path}", flush=True)
+    print(f"访问地址: {url}", flush=True)
+    if not args.no_open:
+        webbrowser.open(url)
+
+    uvicorn.run(create_app(repository_path), host=args.host, port=args.port)
     return 0
 
 
