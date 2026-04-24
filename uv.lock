@@ -155,7 +155,7 @@ wheels = [
 [[package]]
 name = "labs"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "multilspy" },
     { name = "tree-sitter" },
