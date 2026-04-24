@@ -1,4 +1,8 @@
 """Rigel 图谱中间表示。
+
+本模块只定义跨语言稳定的图模型外壳，不承载具体语言的解析规则。
+解析器应把语言相关细节放进节点属性或边属性，保证下游存储、检索与展示
+可以围绕同一套节点/边类型演进。
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ class GraphNode:
 
 @dataclass(frozen=True, slots=True)
 class Repository:
+    """代码仓库节点，作为图谱物理层级的根。"""
+
     repo_id: str
     name: str
 
@@ -65,6 +71,8 @@ class Repository:
 
 @dataclass(frozen=True, slots=True)
 class Module:
+    """仓库内的构建或发布单元。"""
+
     module_id: str
     name: str
     root_path: str
@@ -81,6 +89,12 @@ class Module:
 
 @dataclass(frozen=True, slots=True)
 class File:
+    """源码文件节点。
+
+    content_hash 记录文件原文哈希，用来判断文件级变更；实体级稳定性由 Entity
+    的 semantic_hash 单独描述，二者不能混用。
+    """
+
     file_id: str
     relative_path: str
     language: str
@@ -98,6 +112,11 @@ class File:
 
 @dataclass(frozen=True, slots=True)
 class Entity:
+    """代码实体节点，例如类型、方法、字段等可检索的语义单元。
+
+    kind_norm 面向跨语言消费方，kind_raw 保留解析器原始类型，便于调试与回溯。
+    """
+
     entity_id: str
     entity_key: str
     display_name: str
@@ -117,6 +136,8 @@ class Entity:
 
 @dataclass(frozen=True, slots=True)
 class Anchor:
+    """实体或文件在源码中的位置锚点。"""
+
     anchor_id: str
     start_line: int
     start_col: int
@@ -134,6 +155,8 @@ class Anchor:
 
 @dataclass(frozen=True, slots=True)
 class Summary:
+    """面向检索或聚合展示的摘要节点。"""
+
     summary_id: str
     text: str
     purpose: Literal["retrieval", "rollup"]
@@ -175,6 +198,12 @@ class GraphEdge:
         confidence: float | None = None,
         **properties: JsonValue,
     ) -> Self:
+        """创建带稳定标识的边。
+
+        边 ID 由类型、两端节点和关键语义后缀共同决定，避免同一对节点上不同
+        语义关系互相覆盖。
+        """
+
         edge_properties: JsonObject = dict(properties)
         if kind is not None:
             edge_properties["kind"] = kind
@@ -203,7 +232,8 @@ class GraphEdge:
 
 @dataclass(slots=True)
 class GraphIR:
-    """图谱中间表示根对象。"""
+    """图谱中间表示根对象。
+    """
 
     schema_version: str = "rigel.graph-ir.v1"
     nodes: list[GraphNode] = field(default_factory=list)
@@ -225,9 +255,13 @@ class GraphIR:
 
 
 def _dataclass_properties(model: object) -> JsonObject:
+    """把领域模型字段原样转为节点属性。"""
+
     return {key: value for key, value in asdict(model).items()}
 
 
 def _edge_id(edge_type: EdgeType, source_id: str, target_id: str, properties: JsonObject) -> str:
+    """生成可读且语义稳定的边 ID。"""
+
     semantic_suffix = properties.get("kind") or properties.get("role") or "default"
     return f"{edge_type.value}:{source_id}:{target_id}:{semantic_suffix}"

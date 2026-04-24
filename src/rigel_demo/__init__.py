@@ -14,6 +14,7 @@ from rigel_demo.graph_ir import (
     Summary,
 )
 from rigel_demo.java_parser import JavaParseRequest, parse_java_file
+from rigel_demo.java_semantic_edges import JavaSemanticEdgeRequest, enrich_java_semantic_edges
 
 __all__ = [
     "Anchor",
@@ -28,5 +29,7 @@ __all__ = [
     "Repository",
     "Summary",
     "JavaParseRequest",
+    "JavaSemanticEdgeRequest",
+    "enrich_java_semantic_edges",
     "parse_java_file",
 ]
