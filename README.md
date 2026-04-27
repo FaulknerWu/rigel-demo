@@ -8,6 +8,16 @@
 *   **LSP 封装**: [multilspy](https://github.com/microsoft/multilspy) (针对跨文件分析)
 *   **图数据库**: [FalkorDBLite](https://docs.falkordb.com/operations/falkordblite.html) (用于本地保存 GraphIR 节点与语义边)
 
+## CLI 索引流程
+
+`rigel init` 会扫描当前仓库中的 Java 源码，先用 Tree-sitter 构建基础结构图，再通过
+`multilspy` 启动真实 Java LSP 补全跨文件定义跳转、引用与调用关系。运行前需确保本机
+`java` 命令可用。
+
+```bash
+uv run rigel init
+```
+
 ## FalkorDBLite 写入示例
 
 本项目通过 `FalkorDBStore` 将 `GraphIR` 幂等写入本地 FalkorDBLite。节点会同时带有通用标签

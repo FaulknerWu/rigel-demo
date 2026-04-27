@@ -7,6 +7,7 @@ from dataclasses import dataclass
 DEFAULT_MODULE_NAME = "root"
 DEFAULT_MODULE_ECOSYSTEM = "maven"
 DEFAULT_ZONE = "prod"
+DEFAULT_LSP_TIMEOUT_SECONDS = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,4 +30,4 @@ class JavaSemanticEdgeRequest:
     """Java 语义边补全请求。"""
 
     repository_root_path: str
-    lsp_timeout_seconds: int = 30
+    lsp_timeout_seconds: int = DEFAULT_LSP_TIMEOUT_SECONDS

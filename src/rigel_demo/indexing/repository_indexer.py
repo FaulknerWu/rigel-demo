@@ -37,21 +37,8 @@ class RepositoryIndexResult:
     indexed_file_count: int
 
 
-class EmptyJavaLspClient:
-    """禁用 LSP 时的空客户端，让语义补全退回 Tree-sitter 名称匹配。"""
-
-    def request_definition(self, file_path: str, line: int, column: int) -> list[dict[str, object]]:
-        return []
-
-    def request_references(self, file_path: str, line: int, column: int) -> list[dict[str, object]]:
-        return []
-
-    def request_hover(self, relative_file_path: str, line: int, column: int) -> dict[str, object] | None:
-        return None
-
-
 def index_repository(repository_path: Path) -> RepositoryIndexResult:
-    """扫描仓库源码并构建可写入 FalkorDBLite 的图谱。"""
+    """扫描仓库源码，并通过真实 Java LSP 补全跨文件语义边。"""
 
     resolved_repository_path = repository_path.resolve()
     repository_name = resolved_repository_path.name
@@ -69,7 +56,6 @@ def index_repository(repository_path: Path) -> RepositoryIndexResult:
         enrich_java_semantic_edges(
             graph,
             request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
-            lsp_client=EmptyJavaLspClient(),
         )
 
     return RepositoryIndexResult(graph=graph, indexed_file_count=indexed_file_count)
