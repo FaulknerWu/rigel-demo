@@ -47,6 +47,7 @@ class FalkorDBStore:
     def upsert_graph(self, graph_ir: GraphIR) -> None:
         """按节点再边的顺序幂等写入完整 GraphIR。"""
 
+        # FalkorDB 写边前必须能 MATCH 到两端节点，因此这里固定先写节点再写关系。
         for node in graph_ir.nodes:
             self.upsert_node(node)
         for edge in graph_ir.edges:
@@ -63,6 +64,7 @@ class FalkorDBStore:
                 **node.properties,
             }
         )
+        # node_type 来自 GraphIR 枚举，不接受外部输入；属性值统一走参数化绑定。
         self._graph.query(
             f"""
             MERGE (node:{RIGEL_NODE_LABEL}:{node_type} {{id: $id}})
@@ -84,6 +86,7 @@ class FalkorDBStore:
                 **edge.properties,
             }
         )
+        # edge_type 来自 GraphIR 枚举，不接受外部输入；属性值统一走参数化绑定。
         self._graph.query(
             f"""
             MATCH (source:{RIGEL_NODE_LABEL} {{id: $source_id}})
@@ -111,4 +114,5 @@ def _database_value(value: JsonValue) -> object:
 
     if isinstance(value, str | int | float | bool) or value is None:
         return value
+    # FalkorDB 属性以标量为主，复合值转成排序后的 JSON 字符串，确保重复写入结果稳定。
     return json.dumps(value, ensure_ascii=False, sort_keys=True)

@@ -46,6 +46,7 @@ def index_repository(repository_path: Path) -> RepositoryIndexResult:
     graph = _base_graph(request)
     indexed_file_count = 0
 
+    # 单文件解析会各自产生 Repository/Module 节点，合并时按 id 去重以保留解析器的自包含输出。
     for source_path in _iter_java_files(resolved_repository_path):
         relative_path = source_path.relative_to(resolved_repository_path).as_posix()
         file_graph = parse_java_file(source_path.read_bytes(), relative_path, request=request)
@@ -53,6 +54,7 @@ def index_repository(repository_path: Path) -> RepositoryIndexResult:
         indexed_file_count += 1
 
     if indexed_file_count > 0:
+        # 语义边需要跨文件视角，必须等所有文件的结构实体都进入同一个 GraphIR 后再补全。
         enrich_java_semantic_edges(
             graph,
             request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
@@ -85,6 +87,7 @@ def _base_graph(request: JavaParseRequest) -> GraphIR:
 
 
 def _iter_java_files(repository_path: Path) -> list[Path]:
+    # 排序让索引输出在不同文件系统遍历顺序下保持稳定，便于测试和演示复现。
     return sorted(
         path
         for path in repository_path.rglob("*.java")
@@ -100,6 +103,7 @@ def _merge_graph(target: GraphIR, source: GraphIR) -> None:
     existing_node_ids = {node.id for node in target.nodes}
     existing_edge_ids = {edge.id for edge in target.edges}
 
+    # GraphIR 当前是列表模型，这里显式维护 id 集合，避免 O(n) 反复查找放大仓库级合并成本。
     for node in source.nodes:
         if node.id in existing_node_ids:
             continue

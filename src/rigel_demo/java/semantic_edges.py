@@ -84,6 +84,7 @@ def enrich_java_semantic_edges(
     lsp_context = _started_lsp(repository_root, request.lsp_timeout_seconds) if lsp_client is None else nullcontext(lsp_client)
 
     with lsp_context as active_lsp:
+        # 候选边先由 Tree-sitter 定位语法位置，再交给 LSP 解析真实目标，兼顾覆盖率和语义精度。
         for candidate in _collect_tree_sitter_candidates(repository_root, graph_index):
             target_entity = _resolve_lsp_target(active_lsp, graph_index, candidate)
             if target_entity is not None and target_entity.node.id != candidate.source_entity_id:
@@ -96,6 +97,7 @@ def enrich_java_semantic_edges(
                 )
                 continue
 
+            # LSP 在未完整编译或依赖缺失时可能定位失败，名称回退保留可用但低置信度的演示图谱。
             fallback_target = graph_index.find_unique_entity_by_names(candidate.fallback_names)
             if fallback_target is not None and fallback_target.node.id != candidate.source_entity_id:
                 _add_semantic_edge(
@@ -106,6 +108,7 @@ def enrich_java_semantic_edges(
                     confidence=TREE_SITTER_CONFIDENCE,
                 )
 
+        # references 与 override 依赖完整实体索引，放在候选边补全后统一追加，避免重复扫描 AST。
         _add_lsp_reference_edges(graph, active_lsp, graph_index)
         _add_override_edges(graph, graph_index)
 
@@ -134,6 +137,7 @@ def _collect_tree_sitter_candidates(repository_root: Path, graph_index: GraphInd
         file_entities = graph_index.entities_by_file_path.get(file_path, [])
         top_level_entities = [entity for entity in file_entities if _is_top_level_entity(entity)]
 
+        # import 属于文件级语义，这里挂到顶层实体上，避免把依赖关系散落到无源码实体的文件节点。
         for imported_name in imports.values():
             for source_entity in top_level_entities:
                 import_node = find_import_node(root_node, source_bytes, imported_name)
@@ -189,6 +193,7 @@ def _walk_candidates(
                 )
             )
 
+    # 继承/实现会在专门分支生成 SPECIALIZES 边，这里排除这些容器以免同一类型同时产生依赖边。
     if owner_id is not None and node.type in TYPE_REFERENCE_NODE_KINDS and not has_ancestor_until_declaration(node, INHERITANCE_CONTAINER_KINDS, DECLARATION_NODE_KINDS):
         type_name = node_text(node, source_bytes)
         candidates.append(
@@ -237,6 +242,7 @@ def _add_lsp_reference_edges(graph: GraphIR, lsp_client: JavaLspClient, graph_in
         anchor = target_entity.definition_anchor
         if anchor is None:
             continue
+        # GraphIR 对外使用 1 基坐标；LSP 协议使用 0 基坐标，请求前必须还原。
         line = int(anchor.properties["start_line"]) - 1
         column = int(anchor.properties["start_col"]) - 1
         for location in _safe_lsp_locations(lsp_client.request_references, target_entity.file_path, line, column):
@@ -257,6 +263,7 @@ def _add_lsp_reference_edges(graph: GraphIR, lsp_client: JavaLspClient, graph_in
 
 def _add_override_edges(graph: GraphIR, graph_index: GraphIndex) -> None:
     specializes_edges = [edge for edge in graph.edges if edge.type == EdgeType.SPECIALIZES]
+    # 当前 demo 只推导直接父类型上的同名方法覆盖关系，避免在缺少完整类型系统时过度猜测。
     parent_by_child = {
         edge.source_id: edge.target_id
         for edge in specializes_edges
@@ -307,6 +314,7 @@ def _safe_lsp_locations(method: object, file_path: str, line: int, column: int) 
     try:
         result = method(file_path, line, column)  # type: ignore[misc]
     except Exception:
+        # 语义增强不能因为单个 LSP 请求失败中断整个索引流程，失败位置交给名称回退处理。
         return []
     return [dict(location) for location in result]
 
@@ -354,6 +362,7 @@ def _type_fallback_names(type_name: str, package_name: str, imports: dict[str, s
     cleaned_name = type_name.split("<", 1)[0].replace("[]", "").strip()
     cleaned_simple_name = simple_name(cleaned_name)
     names = [cleaned_name]
+    # 回退名称按“源码写法 -> import 展开 -> 同包限定名 -> 简名”排列，优先保留更精确身份。
     if cleaned_simple_name in imports:
         names.append(imports[cleaned_simple_name])
     if package_name and "." not in cleaned_name:

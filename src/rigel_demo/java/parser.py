@@ -66,11 +66,13 @@ def parse_java_file(
     graph.add_node(repository)
     graph.add_node(module)
     graph.add_node(file_model)
+    # 文件级图谱保持完整的 Repository -> Module -> File 层级，便于单文件解析结果后续无损合并。
     _add_contains_edge(graph, repository.repo_id, module.module_id)
     _add_contains_edge(graph, module.module_id, file_model.file_id)
     _add_anchor(graph, file_model.file_id, "definition", syntax_tree.root_node)
     _add_anchor(graph, file_model.file_id, "body", syntax_tree.root_node)
 
+    # 先把 AST 转成临时实体树，再统一写入 GraphIR，避免递归过程中遗漏父子包含边和锚点。
     top_level_records = _extract_entity_records(
         syntax_tree.root_node,
         source_bytes,
@@ -112,6 +114,7 @@ def _extract_entity_records(
             records.extend(_create_field_records(child, source_bytes, package_name, file_id, parent_qualified_name))
             continue
 
+        # 方法体、类型体和 program 节点只是语义容器，自身不入图，但内部可能声明局部类型或成员。
         if child.type in BODY_NODE_KINDS or node.type == "program":
             records.extend(
                 _extract_entity_records(
@@ -218,6 +221,7 @@ def _create_field_records(
     for declarator in node.named_children:
         if declarator.type != "variable_declarator":
             continue
+        # Java 允许 `int a, b` 共享同一个字段声明节点，因此每个 declarator 都需要独立实体。
         name_node = _required_name_node(declarator)
         display_name = node_text(name_node, source_bytes)
         qualified_name = f"{parent_qualified_name}#{display_name}"
@@ -329,6 +333,7 @@ def _parameter_signature(node: Node, source_bytes: bytes) -> str:
     parameters = next((child for child in node.named_children if child.type == "formal_parameters"), None)
     if parameters is None:
         return "()"
+    # qualified_name 中只放参数类型，既能区分重载，也避免参数名变更造成实体身份漂移。
     parameter_types = [_parameter_type(parameter, source_bytes) for parameter in parameters.named_children]
     return f"({','.join(parameter_type for parameter_type in parameter_types if parameter_type)})"
 
@@ -347,6 +352,7 @@ def _semantic_source(node: Node, source_bytes: bytes, *, extra: str = "") -> byt
 
     tokens = list(_semantic_tokens(node, source_bytes))
     if extra:
+        # 字段声明可能共享声明节点，追加变量名可以避免同一声明中的多个字段产生相同语义哈希。
         tokens.append(extra)
     return " ".join(tokens).encode("utf-8")
 

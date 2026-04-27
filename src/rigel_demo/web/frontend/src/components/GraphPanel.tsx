@@ -18,6 +18,7 @@ export default function GraphPanel() {
   useEffect(() => {
     if (!containerRef.current) return;
 
+    // ForceGraph 需要显式宽高；ResizeObserver 能跟随左右分栏尺寸变化重算画布。
     const observer = new ResizeObserver((entries) => {
       if (!entries[0]) return;
       const { width, height } = entries[0].contentRect;
@@ -34,6 +35,7 @@ export default function GraphPanel() {
 
   useEffect(() => {
     if (!graphRef.current) return;
+    // 图谱节点来自代码层级关系，斥力和连线距离调大后更利于快速分辨模块边界。
     graphRef.current.d3Force('charge').strength(-600);
     graphRef.current.d3Force('link').distance(120);
     graphRef.current.d3ReheatSimulation();
@@ -44,6 +46,7 @@ export default function GraphPanel() {
     setErrorMessage('');
 
     try {
+      // 图数据和摘要互不依赖，并行请求可以减少初次进入页面的空白时间。
       const [nextGraphData, nextSummary] = await Promise.all([fetchGraph(), fetchSummary()]);
       setGraphData(nextGraphData);
       setSummary(nextSummary);
@@ -104,6 +107,7 @@ export default function GraphPanel() {
               const end = link.target;
               if (typeof start !== 'object' || typeof end !== 'object') return;
 
+              // 连线标签只在放大后绘制，避免全图视角下文字盖住节点和边。
               const textPosition = {
                 x: start.x + (end.x - start.x) / 2,
                 y: start.y + (end.y - start.y) / 2,
@@ -145,6 +149,7 @@ export default function GraphPanel() {
 
               if (globalScale < 2.5) return;
 
+              // 节点内部只放短标签，完整信息交给 hover tooltip，避免画布局部拥挤。
               const label = node.name || node.id;
               const fontSize = radius * 0.45;
               canvasContext.font = `600 ${fontSize}px Sans-Serif`;

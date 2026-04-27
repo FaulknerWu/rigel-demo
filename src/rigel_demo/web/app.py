@@ -36,11 +36,13 @@ def create_app(repository_path: Path | None = None) -> FastAPI:
     static_assets_path = static_frontend_path / "assets"
     static_index_path = static_frontend_path / "index.html"
     graph_name = _read_graph_name(state_path)
+    # Web 入口复用 CLI 初始化状态，确保展示和 `rigel init` 写入的是同一个本地图谱。
     graph_reader = RigelGraphReader(database_path=database_path, graph_name=graph_name)
 
     app = FastAPI(title="Rigel Demo", version="0.1.0")
 
     if static_assets_path.exists():
+        # 前端构建产物由 CLI 放入 .rigel，开发阶段不存在时继续暴露 API 和占位页。
         app.mount("/assets", StaticFiles(directory=static_assets_path), name="assets")
 
     @app.get("/api/health")
@@ -160,6 +162,7 @@ class RigelGraphReader:
         if not node_ids:
             return {"nodes": [], "edges": []}
 
+        # 边只返回当前节点窗口内部的关系，避免前端收到指向缺失节点的悬空连线。
         edge_rows = self._query(
             """
             MATCH (source:RigelNode)-[edge]->(target:RigelNode)
@@ -242,6 +245,7 @@ def _ensure_database_exists(database_path: Path) -> None:
 
 def _format_node(labels: list[str], node_id: str, properties: Mapping[str, object]) -> dict[str, object]:
     formatted_properties = dict(properties)
+    # rigel_type 是写入时的稳定类型；标签只作为兼容旧数据或调试数据的兜底来源。
     node_type = str(formatted_properties.get("rigel_type") or _first_domain_label(labels))
     return {
         "id": node_id,
