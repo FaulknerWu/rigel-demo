@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Protocol
 
 from rigel_demo.core.graph_ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType, Summary
 from rigel_demo.embedding import RigelEmbedding
+from rigel_demo.llm import LLMMessage, RigelLLM
 
 RETRIEVAL_SUMMARY_PURPOSE = "retrieval"
 SUMMARY_DESCRIBES_KIND = "retrieval-summary"
 SUMMARY_PROVENANCE = "embedding"
 SUMMARY_SOURCE_HASH_PREFIX = "sha256:"
+LOCAL_STRUCTURE_SUMMARY_MODEL = "rigel-local-structure-summary"
 
 _SUMMARY_TARGET_TYPES = {NodeType.MODULE, NodeType.FILE, NodeType.ENTITY}
 
@@ -27,7 +30,21 @@ class SummaryEmbeddingClient(Protocol):
     def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
 
 
-def attach_retrieval_summaries(graph: GraphIR, *, embedding_client: SummaryEmbeddingClient | RigelEmbedding) -> GraphIR:
+class SummaryTextClient(Protocol):
+    """Summary 文本生成依赖的最小 LLM 客户端接口。"""
+
+    @property
+    def config(self) -> object: ...
+
+    def generate_reply(self, messages: Sequence[LLMMessage]) -> str: ...
+
+
+def attach_retrieval_summaries(
+    graph: GraphIR,
+    *,
+    embedding_client: SummaryEmbeddingClient | RigelEmbedding,
+    summary_client: SummaryTextClient | RigelLLM | None = None,
+) -> GraphIR:
     """为可召回节点追加 Summary 节点和 DESCRIBES 边。"""
 
     existing_node_ids = {node.id for node in graph.nodes}
@@ -37,14 +54,24 @@ def attach_retrieval_summaries(graph: GraphIR, *, embedding_client: SummaryEmbed
         for node in graph.nodes
         if node.type in _SUMMARY_TARGET_TYPES
     ]
-    summary_texts = [_summary_text(target_node) for target_node in target_nodes]
+    summary_texts = [
+        _generate_summary_text(target_node, summary_client=summary_client)
+        for target_node in target_nodes
+    ]
     embeddings = embedding_client.embed_texts(summary_texts)
     if len(embeddings) != len(target_nodes):
         raise ValueError("Embedding 返回数量与 Summary 目标数量不一致")
 
     embedding_model = str(getattr(embedding_client.config, "model"))
+    summary_model = _summary_model(summary_client)
     for target_node, summary_text, embedding in zip(target_nodes, summary_texts, embeddings, strict=True):
-        summary = build_retrieval_summary(target_node, text=summary_text, embedding_model=embedding_model, embedding=embedding)
+        summary = build_retrieval_summary(
+            target_node,
+            text=summary_text,
+            summary_model=summary_model,
+            embedding_model=embedding_model,
+            embedding=embedding,
+        )
         if summary.summary_id not in existing_node_ids:
             graph.add_node(summary)
             existing_node_ids.add(summary.summary_id)
@@ -68,6 +95,7 @@ def build_retrieval_summary(
     target_node: GraphNode,
     *,
     text: str,
+    summary_model: str,
     embedding_model: str,
     embedding: list[float],
 ) -> Summary:
@@ -78,6 +106,7 @@ def build_retrieval_summary(
         text=text,
         purpose=RETRIEVAL_SUMMARY_PURPOSE,
         source_hash=_source_hash(target_node, text),
+        summary_model=summary_model,
         embedding_model=embedding_model,
         embedding_dimensions=len(embedding),
         embedding=embedding,
@@ -99,7 +128,41 @@ def cosine_similarity(left: Iterable[float], right: Iterable[float]) -> float:
     return sum(left * right for left, right in zip(left_values, right_values, strict=True)) / (left_norm * right_norm)
 
 
-def _summary_text(target_node: GraphNode) -> str:
+def _generate_summary_text(target_node: GraphNode, *, summary_client: SummaryTextClient | RigelLLM | None) -> str:
+    if summary_client is None:
+        return _local_summary_text(target_node)
+
+    summary_text = _normalize_summary_text(
+        summary_client.generate_reply([LLMMessage(role="user", content=_summary_prompt(target_node))])
+    )
+    if not summary_text:
+        raise ValueError("Summary 模型返回空摘要")
+    return summary_text
+
+
+def _summary_prompt(target_node: GraphNode) -> str:
+    properties_json = json.dumps(target_node.properties, ensure_ascii=False, sort_keys=True, indent=2)
+    return (
+        "请为以下代码图谱节点生成一条检索摘要。\n"
+        "要求：摘要需要覆盖节点类型、名称、路径或限定名等关键信息；不要输出列表、Markdown 或解释。\n\n"
+        f"节点类型：{target_node.type.value}\n"
+        f"节点 ID：{target_node.id}\n"
+        f"结构摘要：{_local_summary_text(target_node)}\n"
+        f"节点属性：\n{properties_json}"
+    )
+
+
+def _normalize_summary_text(text: str) -> str:
+    return " ".join(line.strip() for line in text.splitlines() if line.strip())
+
+
+def _summary_model(summary_client: SummaryTextClient | RigelLLM | None) -> str:
+    if summary_client is None:
+        return LOCAL_STRUCTURE_SUMMARY_MODEL
+    return str(getattr(summary_client.config, "model"))
+
+
+def _local_summary_text(target_node: GraphNode) -> str:
     properties = target_node.properties
     if target_node.type == NodeType.ENTITY:
         return _join_summary_parts(

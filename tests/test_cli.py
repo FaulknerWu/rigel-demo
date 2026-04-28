@@ -35,7 +35,7 @@ class CliInitTest(TestCase):
             repository_path = Path(workspace)
             config_path = repository_path / ".rigel" / "config.json"
             config_path.parent.mkdir(parents=True)
-            existing_config = {"llm": {"provider": "acme"}}
+            existing_config = {"chat": {"provider": "acme"}}
             config_path.write_text(json.dumps(existing_config, ensure_ascii=False) + "\n", encoding="utf-8")
 
             result = init_repository(repository_path)

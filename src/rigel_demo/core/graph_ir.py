@@ -147,6 +147,7 @@ class Summary:
     text: str
     purpose: Literal["retrieval", "rollup"]
     source_hash: str
+    summary_model: str
     embedding_model: str
     embedding_dimensions: int
     embedding: list[float]

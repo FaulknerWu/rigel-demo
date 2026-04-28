@@ -33,3 +33,8 @@ exclude = [
     "src/rigel_demo/web/frontend/node_modules",
     "src/rigel_demo/web/frontend/dist",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

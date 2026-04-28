@@ -47,6 +47,7 @@
   - `summary_id`, `text` (摘要文本内容)
   - `purpose`: 摘要用途（`retrieval` 用于检索 | `rollup` 用于向上汇总）。
   - `source_hash`: 关联的原始实体的语义哈希。
+  - `summary_model`: 生成摘要文本的模型名称。
   - `embedding_model`: 生成向量的模型名称。
   - `embedding_dimensions`: 生成向量的维度。
   - `embedding`: **向量数据**（Vector）。

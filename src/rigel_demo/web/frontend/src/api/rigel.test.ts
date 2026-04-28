@@ -61,6 +61,7 @@ const recallResult: ApiRecallResult = {
   summary: {
     id: 'summary-1',
     text: 'Class RepositoryIndexer',
+    summary_model: 'gpt-5.2',
     embedding_model: 'text-embedding-3-small',
     embedding_dimensions: 3,
     source_hash: 'sha256:test',

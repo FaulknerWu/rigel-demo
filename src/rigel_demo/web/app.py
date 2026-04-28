@@ -33,6 +33,7 @@ from rigel_demo.indexing.retrieval_summaries import (
 )
 from rigel_demo.llm import (
     LLMConfig,
+    LLMConfigSection,
     LLMConfigurationError,
     LLMMessage,
     LLMRequestError,
@@ -54,7 +55,7 @@ VISIBLE_EDGE_TYPES = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES")
 def create_app(
     repository_path: Path | None = None,
     *,
-    llm_client: RigelLLM | None = None,
+    chat_client: RigelLLM | None = None,
     embedding_client: RigelEmbedding | None = None,
 ) -> FastAPI:
     """创建基于当前仓库 `.rigel` 目录的 Web 演示应用。"""
@@ -69,7 +70,7 @@ def create_app(
     graph_name = _read_graph_name(state_path)
     # Web 入口复用 CLI 索引状态，确保展示和 `rigel index` 写入的是同一个本地图谱。
     graph_reader = RigelGraphReader(database_path=database_path, graph_name=graph_name)
-    active_llm_client, llm_configuration_error = _resolve_llm_client(resolved_repository_path, llm_client)
+    active_chat_client, chat_configuration_error = _resolve_chat_client(resolved_repository_path, chat_client)
     active_embedding_client, embedding_configuration_error = _resolve_embedding_client(resolved_repository_path, embedding_client)
 
     app = FastAPI(title="Rigel Demo", version="0.1.0")
@@ -88,7 +89,7 @@ def create_app(
             "workspace_path": str(workspace_path),
             "database_path": str(database_path),
             "graph_name": graph_name,
-            "llm": _llm_status(active_llm_client, llm_configuration_error),
+            "chat": _llm_status(active_chat_client, chat_configuration_error),
             "embedding": _embedding_status(active_embedding_client, embedding_configuration_error),
         }
 
@@ -148,8 +149,8 @@ def create_app(
     def chat(request: ChatRequest) -> dict[str, object]:
         """调用已配置的 LLM 生成对话回复。"""
 
-        if active_llm_client is None:
-            raise HTTPException(status_code=503, detail=llm_configuration_error or "LLM 未配置")
+        if active_chat_client is None:
+            raise HTTPException(status_code=503, detail=chat_configuration_error or "Chat 模型未配置")
         if database_artifact_exists(database_path) and active_embedding_client is None:
             raise HTTPException(status_code=503, detail=embedding_configuration_error or "Embedding 未配置")
 
@@ -167,7 +168,7 @@ def create_app(
                 database_path=database_path,
                 embedding_client=active_embedding_client,
             )
-            reply = active_llm_client.generate_reply(enriched_messages)
+            reply = active_chat_client.generate_reply(enriched_messages)
         except (EmbeddingRequestError, EmbeddingResponseError) as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
         except (LLMRequestError, LLMResponseError) as error:
@@ -176,9 +177,9 @@ def create_app(
         return {
             "status": "success",
             "message": {"role": "assistant", "content": reply},
-            "model": active_llm_client.config.model,
-            "provider": active_llm_client.config.provider,
-            "format": active_llm_client.config.format.value,
+            "model": active_chat_client.config.model,
+            "provider": active_chat_client.config.provider,
+            "format": active_chat_client.config.format.value,
         }
 
     @app.get("/", response_model=None)
@@ -432,13 +433,13 @@ def _ensure_database_exists(database_path: Path) -> None:
         )
 
 
-def _resolve_llm_client(repository_path: Path, provided_client: RigelLLM | None) -> tuple[RigelLLM | None, str | None]:
+def _resolve_chat_client(repository_path: Path, provided_client: RigelLLM | None) -> tuple[RigelLLM | None, str | None]:
     if provided_client is not None:
         # 测试和嵌入场景可以显式传入客户端，避免读取当前仓库的本地配置文件。
         return provided_client, None
 
     try:
-        return RigelLLM(LLMConfig.from_repository(repository_path)), None
+        return RigelLLM(LLMConfig.from_repository(repository_path, LLMConfigSection.CHAT)), None
     except LLMConfigurationError as error:
         return None, str(error)
 
@@ -610,6 +611,7 @@ def _format_summary(summary_id: str, properties: Mapping[str, object]) -> dict[s
     return {
         "id": summary_id,
         "text": _read_property(properties, "text"),
+        "summary_model": _read_property(properties, "summary_model"),
         "embedding_model": _read_property(properties, "embedding_model"),
         "embedding_dimensions": _read_int_property(properties, "embedding_dimensions"),
         "source_hash": _read_property(properties, "source_hash"),

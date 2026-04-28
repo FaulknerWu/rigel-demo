@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from rigel_demo.core import EdgeType, Entity, GraphEdge, GraphIR, Module, Repository
 from rigel_demo.embedding import EmbeddingConfig, EmbeddingFormat
 from rigel_demo.indexing.retrieval_summaries import attach_retrieval_summaries
-from rigel_demo.llm import LLMConfig, LLMFormat, LLMMessage
+from rigel_demo.llm import LLMConfig, LLMConfigSection, LLMFormat, LLMMessage
 from rigel_demo.storage import FalkorDBConfig, FalkorDBStore
 from rigel_demo.web.app import create_app
 
@@ -27,7 +27,7 @@ class WebAppLLMTest(TestCase):
     def test_chat_uses_injected_llm_client(self) -> None:
         fake_llm = _FakeRigelLLM()
         with TemporaryDirectory() as workspace:
-            client = TestClient(create_app(Path(workspace), llm_client=fake_llm))
+            client = TestClient(create_app(Path(workspace), chat_client=fake_llm))
 
             response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "你好"}]})
 
@@ -57,7 +57,7 @@ class WebAppLLMTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, llm_client=fake_llm, embedding_client=fake_embedding))
+            client = TestClient(create_app(repository_path, chat_client=fake_llm, embedding_client=fake_embedding))
 
             response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "PaymentService 做什么"}]})
 
@@ -94,7 +94,7 @@ def _write_demo_graph(repository_path: Path, embedding_client: "_FakeEmbeddingCl
     graph.add_node(entity)
     graph.add_edge(GraphEdge.create(EdgeType.CONTAINS, repository.repo_id, module.module_id, kind="physical-membership"))
     graph.add_edge(GraphEdge.create(EdgeType.CONTAINS, module.module_id, entity.entity_id, kind="physical-membership"))
-    attach_retrieval_summaries(graph, embedding_client=embedding_client)
+    attach_retrieval_summaries(graph, embedding_client=embedding_client, summary_client=_FakeSummaryClient())
     FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))).upsert_graph(graph)
 
 
@@ -108,6 +108,7 @@ class _FakeRigelLLM:
             base_url=None,
             timeout_seconds=1,
             system_prompt="系统提示",
+            section=LLMConfigSection.CHAT,
         )
         self.messages: list[LLMMessage] = []
 
@@ -137,3 +138,20 @@ class _FakeEmbeddingClient:
 
     def _embedding_for_text(self, text: str) -> list[float]:
         return [1.0, 0.0, 0.0] if "PaymentService" in text else [0.0, 1.0, 0.0]
+
+
+class _FakeSummaryClient:
+    def __init__(self) -> None:
+        self.config = LLMConfig(
+            provider="openai",
+            format=LLMFormat.OPENAI_RESPONSES,
+            model="summary-model",
+            api_key="fake-key",
+            base_url=None,
+            timeout_seconds=1,
+            system_prompt="摘要提示",
+            section=LLMConfigSection.SUMMARY,
+        )
+
+    def generate_reply(self, messages: list[LLMMessage]) -> str:
+        return "PaymentService 处理付款流程"

@@ -9,6 +9,7 @@ from unittest import TestCase
 from rigel_demo.llm import (
     DEFAULT_GOOGLE_BASE_URL,
     LLMConfig,
+    LLMConfigSection,
     LLMConfigurationError,
     LLMFormat,
     LLMMessage,
@@ -31,10 +32,47 @@ class LLMConfigTest(TestCase):
             config = LLMConfig.from_repository(repository_path)
 
         self.assertEqual(config.provider, "google")
+        self.assertEqual(config.section, LLMConfigSection.CHAT)
         self.assertEqual(config.format, LLMFormat.GOOGLE_GENERATE_CONTENT)
         self.assertEqual(config.model, "gemini-3-flash-preview")
         self.assertEqual(config.api_key, "gemini-key")
         self.assertEqual(config.base_url, DEFAULT_GOOGLE_BASE_URL)
+
+    def test_summary_section_reads_independent_model(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            config_path = repository_path / ".rigel" / "config.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "chat": {
+                            "provider": "openai",
+                            "format": "openai_responses",
+                            "model": "gpt-5.2",
+                            "api_key": "chat-key",
+                        },
+                        "summary": {
+                            "provider": "openai",
+                            "format": "openai_responses",
+                            "model": "gpt-5.2-mini",
+                            "api_key": "summary-key",
+                            "max_output_tokens": 256,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = LLMConfig.from_repository(repository_path, LLMConfigSection.SUMMARY)
+
+        self.assertEqual(config.section, LLMConfigSection.SUMMARY)
+        self.assertEqual(config.model, "gpt-5.2-mini")
+        self.assertEqual(config.api_key, "summary-key")
+        self.assertEqual(config.max_output_tokens, 256)
+        self.assertIn("摘要生成器", config.system_prompt)
 
     def test_openai_responses_config_supports_custom_base_url(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -69,7 +107,7 @@ class LLMConfigTest(TestCase):
                 },
             )
 
-            with self.assertRaisesRegex(LLMConfigurationError, "llm.base_url"):
+            with self.assertRaisesRegex(LLMConfigurationError, "chat.base_url"):
                 LLMConfig.from_repository(repository_path)
 
     def test_custom_provider_accepts_configured_format_key_and_base_url(self) -> None:
@@ -96,7 +134,7 @@ class LLMConfigTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = _write_llm_config(Path(workspace), {"api_key": "test-key"})
 
-            with self.assertRaisesRegex(LLMConfigurationError, "llm.model"):
+            with self.assertRaisesRegex(LLMConfigurationError, "chat.model"):
                 LLMConfig.from_repository(repository_path)
 
     def test_missing_config_file_fails_fast(self) -> None:
@@ -151,10 +189,15 @@ class RigelLLMTest(TestCase):
         self.assertEqual(fake_http_client.json_body["system_instruction"], {"parts": [{"text": "系统提示"}]})
 
 
-def _write_llm_config(repository_path: Path, config: dict[str, object]) -> Path:
+def _write_llm_config(
+    repository_path: Path,
+    config: dict[str, object],
+    *,
+    section: LLMConfigSection = LLMConfigSection.CHAT,
+) -> Path:
     config_path = repository_path / ".rigel" / "config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps({"llm": config}, ensure_ascii=False) + "\n", encoding="utf-8")
+    config_path.write_text(json.dumps({section.value: config}, ensure_ascii=False) + "\n", encoding="utf-8")
     return repository_path
 
 

@@ -44,6 +44,7 @@ export interface ApiRecallResult {
   summary: {
     id: string;
     text: string;
+    summary_model: string;
     embedding_model: string;
     embedding_dimensions: number;
     source_hash: string;

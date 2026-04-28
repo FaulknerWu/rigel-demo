@@ -20,7 +20,7 @@ WORKSPACE_STATE_FILE_NAME = "rigel.json"
 WEB_STATIC_DIRECTORY_NAME = "web/static"
 DEFAULT_GRAPH_NAME = "rigel"
 DEFAULT_CONFIG_DOCUMENT = {
-    "llm": {
+    "chat": {
         "provider": "openai",
         "format": "openai_responses",
         "model": "gpt-5.2",
@@ -29,6 +29,17 @@ DEFAULT_CONFIG_DOCUMENT = {
         "timeout_seconds": 60,
         "temperature": None,
         "max_output_tokens": None,
+        "system_prompt": None,
+    },
+    "summary": {
+        "provider": "openai",
+        "format": "openai_responses",
+        "model": "gpt-5.2",
+        "api_key": "sk-your-openai-key",
+        "base_url": None,
+        "timeout_seconds": 60,
+        "temperature": 0,
+        "max_output_tokens": 300,
         "system_prompt": None,
     },
     "embedding": {

@@ -16,7 +16,9 @@ __pycache__/
 .venv/
 .env
 .env.*
-.rigel/config.json
+
+# Rigel 本地运行工作目录
+.rigel/
 
 # Frontend build dependencies
 node_modules/

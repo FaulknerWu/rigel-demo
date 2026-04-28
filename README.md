@@ -16,7 +16,7 @@
 uv run rigel init
 ```
 
-填好 LLM 与 Embedding 配置后，再执行索引：
+填好 Chat、Summary 与 Embedding 配置后，再执行索引：
 
 ```bash
 uv run rigel index
@@ -26,18 +26,24 @@ uv run rigel index
 `multilspy` 启动真实 Java LSP 补全跨文件定义跳转、引用与调用关系，并重建
 `.rigel/falkordb.db`。运行前需确保本机 `java` 命令可用。
 
-## LLM 配置
+## 功能级模型配置
 
-Web 聊天面板通过后端 `/api/chat` 调用统一的 LLM 基座。配置写在目标仓库
-`.rigel/config.json` 中，`rigel init` 会生成默认模板。`llm.provider`
-是提供商名称，可按需新增；`llm.format` 决定请求协议格式，当前支持
-`openai_chat`、`google_generate_content` 与 `openai_responses`。
+模型配置写在目标仓库 `.rigel/config.json` 中，`rigel init` 会生成默认模板。
+当前按功能拆分为三个顶层字段：
+
+- `chat`: Web 聊天面板 `/api/chat` 使用的生成模型。
+- `summary`: `rigel index` 生成 `Summary.text` 使用的生成模型。
+- `embedding`: `rigel index` 写入 Summary 向量、Web 召回查询向量使用的嵌入模型。
+
+`chat` 与 `summary` 都复用同一套 LLM 客户端字段。`provider` 是提供商名称，
+`format` 决定请求协议格式，当前支持 `openai_chat`、`google_generate_content`
+与 `openai_responses`。两个功能可以配置不同的模型、密钥、Base URL 与生成参数。
 
 OpenAI Responses API：
 
 ```json
 {
-  "llm": {
+  "chat": {
     "provider": "openai",
     "format": "openai_responses",
     "model": "gpt-5.2",
@@ -50,12 +56,14 @@ OpenAI Chat Completions API：
 
 ```json
 {
-  "llm": {
+  "summary": {
     "provider": "openai",
     "format": "openai_chat",
-    "model": "gpt-5.2",
+    "model": "gpt-5.2-mini",
     "api_key": "sk-your-openai-key",
-    "base_url": "https://api.openai.com/v1"
+    "base_url": "https://api.openai.com/v1",
+    "temperature": 0,
+    "max_output_tokens": 300
   }
 }
 ```
@@ -64,7 +72,7 @@ Google Gemini 原生 generateContent：
 
 ```json
 {
-  "llm": {
+  "chat": {
     "provider": "google",
     "format": "google_generate_content",
     "model": "gemini-3-flash-preview",
@@ -73,10 +81,9 @@ Google Gemini 原生 generateContent：
 }
 ```
 
-新增提供商时设置新的 `llm.provider` 名称，选择其兼容的 `llm.format`，
-并通过 `llm.api_key` 与 `llm.base_url` 配置访问参数。可选生成参数包括
-`llm.timeout_seconds`、`llm.temperature`、`llm.max_output_tokens` 与
-`llm.system_prompt`。
+新增提供商时设置新的 `chat.provider` 或 `summary.provider` 名称，选择其兼容的
+`format`，并通过对应功能段的 `api_key` 与 `base_url` 配置访问参数。可选生成参数包括
+`timeout_seconds`、`temperature`、`max_output_tokens` 与 `system_prompt`。
 
 ## Embedding 配置
 
@@ -136,9 +143,11 @@ RETURN entity.qualified_name, target.qualified_name
 
 ## 本地向量召回链路
 
-`rigel index` 会为 Module、File 与 Entity 生成 `Summary` 节点，调用
-`.rigel/config.json` 中配置的真实 Embedding 模型写入 `Summary.embedding`，并通过
-`DESCRIBES` 边连接到被描述的图谱节点。
+`rigel index` 会为 Module、File 与 Entity 生成 `Summary` 节点。流程是先调用
+`.rigel/config.json` 中 `summary` 配置的生成模型写入 `Summary.text`，再调用
+`embedding` 配置的真实 Embedding 模型写入 `Summary.embedding`，并通过 `DESCRIBES`
+边连接到被描述的图谱节点。`Summary.summary_model` 和 `Summary.embedding_model`
+会分别记录两类模型名称。
 
 Web 后端提供 `/api/recall?q=PaymentService`，流程为：
 
