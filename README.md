@@ -8,20 +8,28 @@
 *   **LSP 封装**: [multilspy](https://github.com/microsoft/multilspy) (针对跨文件分析)
 *   **图数据库**: [FalkorDBLite](https://docs.falkordb.com/operations/falkordblite.html) (用于本地保存 GraphIR 节点与语义边)
 
-## CLI 索引流程
+## CLI 初始化与索引流程
 
-`rigel init` 会扫描当前仓库中的 Java 源码，先用 Tree-sitter 构建基础结构图，再通过
-`multilspy` 启动真实 Java LSP 补全跨文件定义跳转、引用与调用关系。运行前需确保本机
-`java` 命令可用。
+先在目标仓库生成 `.rigel/config.json`：
 
 ```bash
 uv run rigel init
 ```
 
+填好 LLM 与 Embedding 配置后，再执行索引：
+
+```bash
+uv run rigel index
+```
+
+`rigel index` 会扫描当前仓库中的 Java 源码，先用 Tree-sitter 构建基础结构图，再通过
+`multilspy` 启动真实 Java LSP 补全跨文件定义跳转、引用与调用关系，并重建
+`.rigel/falkordb.db`。运行前需确保本机 `java` 命令可用。
+
 ## LLM 配置
 
 Web 聊天面板通过后端 `/api/chat` 调用统一的 LLM 基座。配置写在目标仓库
-`.rigel/config.json` 中，字段示例见 `.rigel/config.example.json`。`llm.provider`
+`.rigel/config.json` 中，`rigel init` 会生成默认模板。`llm.provider`
 是提供商名称，可按需新增；`llm.format` 决定请求协议格式，当前支持
 `openai_chat`、`google_generate_content` 与 `openai_responses`。
 
@@ -70,6 +78,30 @@ Google Gemini 原生 generateContent：
 `llm.timeout_seconds`、`llm.temperature`、`llm.max_output_tokens` 与
 `llm.system_prompt`。
 
+## Embedding 配置
+
+`rigel index` 会调用真实 Embedding API 生成 Summary 向量。配置同样写在目标仓库
+`.rigel/config.json` 中的 `embedding` 字段，当前支持 OpenAI-compatible
+`/embeddings` 请求格式。
+
+```json
+{
+  "embedding": {
+    "provider": "openai",
+    "format": "openai_embeddings",
+    "model": "text-embedding-3-small",
+    "api_key": "sk-your-openai-key",
+    "base_url": null,
+    "dimensions": 512,
+    "timeout_seconds": 60,
+    "batch_size": 64
+  }
+}
+```
+
+`embedding.model`、`embedding.dimensions` 与索引写入的 Summary 向量维度必须和
+Web 召回时保持一致；修改后需要重新执行 `rigel index` 重建 `.rigel/falkordb.db`。
+
 ## FalkorDBLite 写入示例
 
 本项目通过 `FalkorDBStore` 将 `GraphIR` 幂等写入本地 FalkorDBLite。节点会同时带有通用标签
@@ -101,6 +133,21 @@ store.upsert_graph(graph)
 MATCH (entity:RigelNode:Entity)-[:DEPENDS_ON]->(target:RigelNode:Entity)
 RETURN entity.qualified_name, target.qualified_name
 ```
+
+## 本地向量召回链路
+
+`rigel index` 会为 Module、File 与 Entity 生成 `Summary` 节点，调用
+`.rigel/config.json` 中配置的真实 Embedding 模型写入 `Summary.embedding`，并通过
+`DESCRIBES` 边连接到被描述的图谱节点。
+
+Web 后端提供 `/api/recall?q=PaymentService`，流程为：
+
+1. 将用户问题映射到同一套本地向量空间。
+2. 读取 `Summary` 节点并按余弦相似度排序，得到召回种子。
+3. 通过 `DESCRIBES` 锁定目标 Module、File 或 Entity。
+4. 沿 `CONTAINS`、`DEPENDS_ON`、`SPECIALIZES`、`ALIASES` 补充一跳上下文。
+
+`/api/chat` 会优先使用这条向量召回链路组装代码图谱上下文；召回为空时才回退到字段关键词搜索。
 
 Rigel 主仓库正式的架构决策与主线规划见：
 - GitHub: <https://github.com/FaulknerWu/Rigel>
