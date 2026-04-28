@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rigel_demo.core.graph_ir import EdgeType, GraphEdge, GraphIR, Module, Repository
+from rigel_demo.embedding import EmbeddingConfig, RigelEmbedding
+from rigel_demo.indexing.retrieval_summaries import SummaryEmbeddingClient, attach_retrieval_summaries
 from rigel_demo.java import JavaParseRequest, JavaSemanticEdgeRequest, enrich_java_semantic_edges, parse_java_file
 from rigel_demo.java.requests import DEFAULT_MODULE_ECOSYSTEM, DEFAULT_MODULE_NAME, DEFAULT_ZONE
 
@@ -37,10 +39,15 @@ class RepositoryIndexResult:
     indexed_file_count: int
 
 
-def index_repository(repository_path: Path) -> RepositoryIndexResult:
+def index_repository(
+    repository_path: Path,
+    *,
+    embedding_client: SummaryEmbeddingClient | RigelEmbedding | None = None,
+) -> RepositoryIndexResult:
     """扫描仓库源码，并通过真实 Java LSP 补全跨文件语义边。"""
 
     resolved_repository_path = repository_path.resolve()
+    active_embedding_client = embedding_client or RigelEmbedding(EmbeddingConfig.from_repository(resolved_repository_path))
     repository_name = resolved_repository_path.name
     request = JavaParseRequest(repository_name=repository_name)
     graph = _base_graph(request)
@@ -59,6 +66,7 @@ def index_repository(repository_path: Path) -> RepositoryIndexResult:
             graph,
             request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
         )
+    attach_retrieval_summaries(graph, embedding_client=active_embedding_client)
 
     return RepositoryIndexResult(graph=graph, indexed_file_count=indexed_file_count)
 

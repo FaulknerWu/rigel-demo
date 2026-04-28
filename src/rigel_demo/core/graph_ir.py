@@ -148,6 +148,7 @@ class Summary:
     purpose: Literal["retrieval", "rollup"]
     source_hash: str
     embedding_model: str
+    embedding_dimensions: int
     embedding: list[float]
 
     def to_node(self) -> GraphNode:

@@ -9,5 +9,15 @@
     "temperature": null,
     "max_output_tokens": null,
     "system_prompt": null
+  },
+  "embedding": {
+    "provider": "openai",
+    "format": "openai_embeddings",
+    "model": "text-embedding-3-small",
+    "api_key": "sk-your-openai-key",
+    "base_url": null,
+    "dimensions": 512,
+    "timeout_seconds": 60,
+    "batch_size": 64
   }
 }
