@@ -296,11 +296,11 @@ def _ensure_database_exists(database_path: Path) -> None:
 
 def _resolve_llm_client(repository_path: Path, provided_client: RigelLLM | None) -> tuple[RigelLLM | None, str | None]:
     if provided_client is not None:
-        # 测试和嵌入场景可以显式传入客户端，避免读取当前仓库的环境变量。
+        # 测试和嵌入场景可以显式传入客户端，避免读取当前仓库的本地配置文件。
         return provided_client, None
 
     try:
-        return RigelLLM(LLMConfig.from_env(repository_path)), None
+        return RigelLLM(LLMConfig.from_repository(repository_path)), None
     except LLMConfigurationError as error:
         return None, str(error)
 

@@ -20,40 +20,55 @@ uv run rigel init
 
 ## LLM 配置
 
-Web 聊天面板通过后端 `/api/chat` 调用统一的 LLM 基座。配置写在目标仓库根目录 `.env`
-中，字段示例见 `.env.example`。`RIGEL_LLM_PROVIDER` 是提供商名称，可按需新增；
-`RIGEL_LLM_FORMAT` 决定请求协议格式，当前支持 `openai_chat`、`google_generate_content`
-与 `openai_responses`。
+Web 聊天面板通过后端 `/api/chat` 调用统一的 LLM 基座。配置写在目标仓库
+`.rigel/config.json` 中，字段示例见 `.rigel/config.example.json`。`llm.provider`
+是提供商名称，可按需新增；`llm.format` 决定请求协议格式，当前支持
+`openai_chat`、`google_generate_content` 与 `openai_responses`。
 
 OpenAI Responses API：
 
-```bash
-RIGEL_LLM_PROVIDER=openai
-RIGEL_LLM_FORMAT=openai_responses
-RIGEL_LLM_MODEL=gpt-5.2
-OPENAI_API_KEY=sk-your-openai-key
+```json
+{
+  "llm": {
+    "provider": "openai",
+    "format": "openai_responses",
+    "model": "gpt-5.2",
+    "api_key": "sk-your-openai-key"
+  }
+}
 ```
 
 OpenAI Chat Completions API：
 
-```bash
-RIGEL_LLM_PROVIDER=openai
-RIGEL_LLM_FORMAT=openai_chat
-RIGEL_LLM_MODEL=gpt-5.2
-OPENAI_API_KEY=sk-your-openai-key
+```json
+{
+  "llm": {
+    "provider": "openai",
+    "format": "openai_chat",
+    "model": "gpt-5.2",
+    "api_key": "sk-your-openai-key",
+    "base_url": "https://api.openai.com/v1"
+  }
+}
 ```
 
 Google Gemini 原生 generateContent：
 
-```bash
-RIGEL_LLM_PROVIDER=google
-RIGEL_LLM_FORMAT=google_generate_content
-RIGEL_LLM_MODEL=gemini-3-flash-preview
-GEMINI_API_KEY=your-gemini-key
+```json
+{
+  "llm": {
+    "provider": "google",
+    "format": "google_generate_content",
+    "model": "gemini-3-flash-preview",
+    "api_key": "your-gemini-key"
+  }
+}
 ```
 
-新增提供商时设置新的 `RIGEL_LLM_PROVIDER` 名称，选择其兼容的 `RIGEL_LLM_FORMAT`，
-并通过 `RIGEL_LLM_API_KEY` 与 `RIGEL_LLM_BASE_URL` 配置访问参数。
+新增提供商时设置新的 `llm.provider` 名称，选择其兼容的 `llm.format`，
+并通过 `llm.api_key` 与 `llm.base_url` 配置访问参数。可选生成参数包括
+`llm.timeout_seconds`、`llm.temperature`、`llm.max_output_tokens` 与
+`llm.system_prompt`。
 
 ## FalkorDBLite 写入示例
 

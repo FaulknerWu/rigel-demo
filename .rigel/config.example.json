@@ -1,0 +1,13 @@
+{
+  "llm": {
+    "provider": "openai",
+    "format": "openai_responses",
+    "model": "gpt-5.2",
+    "api_key": "sk-your-openai-key",
+    "base_url": null,
+    "timeout_seconds": 60,
+    "temperature": null,
+    "max_output_tokens": null,
+    "system_prompt": null
+  }
+}

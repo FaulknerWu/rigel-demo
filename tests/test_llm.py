@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import os
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import patch
 
 from rigel_demo.llm import (
     DEFAULT_GOOGLE_BASE_URL,
@@ -19,20 +18,17 @@ from rigel_demo.llm import (
 
 class LLMConfigTest(TestCase):
     def test_google_provider_uses_native_generate_content_defaults(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            with TemporaryDirectory() as workspace:
-                repository_path = _write_env(
-                    Path(workspace),
-                    "\n".join(
-                        [
-                            "RIGEL_LLM_PROVIDER=google",
-                            "RIGEL_LLM_MODEL=gemini-3-flash-preview",
-                            "GEMINI_API_KEY=gemini-key",
-                        ]
-                    ),
-                )
+        with TemporaryDirectory() as workspace:
+            repository_path = _write_llm_config(
+                Path(workspace),
+                {
+                    "provider": "google",
+                    "model": "gemini-3-flash-preview",
+                    "api_key": "gemini-key",
+                },
+            )
 
-                config = LLMConfig.from_env(repository_path)
+            config = LLMConfig.from_repository(repository_path)
 
         self.assertEqual(config.provider, "google")
         self.assertEqual(config.format, LLMFormat.GOOGLE_GENERATE_CONTENT)
@@ -41,23 +37,20 @@ class LLMConfigTest(TestCase):
         self.assertEqual(config.base_url, DEFAULT_GOOGLE_BASE_URL)
 
     def test_openai_responses_config_supports_custom_base_url(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            with TemporaryDirectory() as workspace:
-                repository_path = _write_env(
-                    Path(workspace),
-                    "\n".join(
-                        [
-                            "RIGEL_LLM_PROVIDER=openai",
-                            "RIGEL_LLM_FORMAT=openai_responses",
-                            "RIGEL_LLM_MODEL=gpt-custom",
-                            "RIGEL_LLM_API_KEY=openai-key",
-                            "RIGEL_LLM_BASE_URL=https://example.test/v1",
-                            "RIGEL_LLM_MAX_OUTPUT_TOKENS=1024",
-                        ]
-                    ),
-                )
+        with TemporaryDirectory() as workspace:
+            repository_path = _write_llm_config(
+                Path(workspace),
+                {
+                    "provider": "openai",
+                    "format": "openai_responses",
+                    "model": "gpt-custom",
+                    "api_key": "openai-key",
+                    "base_url": "https://example.test/v1",
+                    "max_output_tokens": 1024,
+                },
+            )
 
-                config = LLMConfig.from_env(repository_path)
+            config = LLMConfig.from_repository(repository_path)
 
         self.assertEqual(config.provider, "openai")
         self.assertEqual(config.format, LLMFormat.OPENAI_RESPONSES)
@@ -65,40 +58,34 @@ class LLMConfigTest(TestCase):
         self.assertEqual(config.max_output_tokens, 1024)
 
     def test_custom_provider_requires_base_url(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            with TemporaryDirectory() as workspace:
-                repository_path = _write_env(
-                    Path(workspace),
-                    "\n".join(
-                        [
-                            "RIGEL_LLM_PROVIDER=acme",
-                            "RIGEL_LLM_FORMAT=openai_chat",
-                            "RIGEL_LLM_MODEL=acme-chat",
-                            "RIGEL_LLM_API_KEY=acme-key",
-                        ]
-                    ),
-                )
+        with TemporaryDirectory() as workspace:
+            repository_path = _write_llm_config(
+                Path(workspace),
+                {
+                    "provider": "acme",
+                    "format": "openai_chat",
+                    "model": "acme-chat",
+                    "api_key": "acme-key",
+                },
+            )
 
-                with self.assertRaisesRegex(LLMConfigurationError, "RIGEL_LLM_BASE_URL"):
-                    LLMConfig.from_env(repository_path)
+            with self.assertRaisesRegex(LLMConfigurationError, "llm.base_url"):
+                LLMConfig.from_repository(repository_path)
 
     def test_custom_provider_accepts_configured_format_key_and_base_url(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            with TemporaryDirectory() as workspace:
-                repository_path = _write_env(
-                    Path(workspace),
-                    "\n".join(
-                        [
-                            "RIGEL_LLM_PROVIDER=acme",
-                            "RIGEL_LLM_FORMAT=openai_chat",
-                            "RIGEL_LLM_MODEL=acme-chat",
-                            "RIGEL_LLM_API_KEY=acme-key",
-                            "RIGEL_LLM_BASE_URL=https://acme.example/v1",
-                        ]
-                    ),
-                )
+        with TemporaryDirectory() as workspace:
+            repository_path = _write_llm_config(
+                Path(workspace),
+                {
+                    "provider": "acme",
+                    "format": "openai_chat",
+                    "model": "acme-chat",
+                    "api_key": "acme-key",
+                    "base_url": "https://acme.example/v1",
+                },
+            )
 
-                config = LLMConfig.from_env(repository_path)
+            config = LLMConfig.from_repository(repository_path)
 
         self.assertEqual(config.provider, "acme")
         self.assertEqual(config.format, LLMFormat.OPENAI_CHAT)
@@ -106,12 +93,16 @@ class LLMConfigTest(TestCase):
         self.assertEqual(config.base_url, "https://acme.example/v1")
 
     def test_missing_model_fails_fast(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            with TemporaryDirectory() as workspace:
-                repository_path = _write_env(Path(workspace), "RIGEL_LLM_API_KEY=test-key")
+        with TemporaryDirectory() as workspace:
+            repository_path = _write_llm_config(Path(workspace), {"api_key": "test-key"})
 
-                with self.assertRaisesRegex(LLMConfigurationError, "RIGEL_LLM_MODEL"):
-                    LLMConfig.from_env(repository_path)
+            with self.assertRaisesRegex(LLMConfigurationError, "llm.model"):
+                LLMConfig.from_repository(repository_path)
+
+    def test_missing_config_file_fails_fast(self) -> None:
+        with TemporaryDirectory() as workspace:
+            with self.assertRaisesRegex(LLMConfigurationError, ".rigel/config.json"):
+                LLMConfig.from_repository(Path(workspace))
 
 
 class RigelLLMTest(TestCase):
@@ -160,8 +151,10 @@ class RigelLLMTest(TestCase):
         self.assertEqual(fake_http_client.json_body["system_instruction"], {"parts": [{"text": "系统提示"}]})
 
 
-def _write_env(repository_path: Path, content: str) -> Path:
-    repository_path.joinpath(".env").write_text(content + "\n", encoding="utf-8")
+def _write_llm_config(repository_path: Path, config: dict[str, object]) -> Path:
+    config_path = repository_path / ".rigel" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({"llm": config}, ensure_ascii=False) + "\n", encoding="utf-8")
     return repository_path
 
 

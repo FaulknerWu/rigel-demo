@@ -1,16 +1,19 @@
-"""从环境变量加载 LLM 运行配置。"""
+"""从仓库 `.rigel/config.json` 加载 LLM 运行配置。"""
 
 from __future__ import annotations
 
-import os
+import json
 from dataclasses import dataclass
 from enum import StrEnum
+from json import JSONDecodeError
 from pathlib import Path
+from typing import Any
 
-from dotenv import load_dotenv
 
-
-ENV_FILE_NAME = ".env"
+RIGEL_CONFIG_DIRECTORY_NAME = ".rigel"
+RIGEL_CONFIG_FILE_NAME = "config.json"
+LLM_CONFIG_SECTION_NAME = "llm"
+LLM_CONFIG_RELATIVE_PATH = Path(RIGEL_CONFIG_DIRECTORY_NAME) / RIGEL_CONFIG_FILE_NAME
 DEFAULT_GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_SYSTEM_PROMPT = (
@@ -46,22 +49,19 @@ class LLMConfig:
     max_output_tokens: int | None = None
 
     @classmethod
-    def from_env(cls, repository_path: Path) -> "LLMConfig":
-        """从目标仓库 `.env` 与当前进程环境读取 LLM 配置。"""
+    def from_repository(cls, repository_path: Path) -> "LLMConfig":
+        """从目标仓库 `.rigel/config.json` 读取 LLM 配置。"""
 
-        env_path = repository_path / ENV_FILE_NAME
-        if env_path.exists():
-            load_dotenv(env_path, override=False)
-
-        provider = _read_provider()
-        llm_format = _read_format(provider)
-        model = _require_env("RIGEL_LLM_MODEL")
-        api_key = _read_api_key(provider)
-        base_url = _read_base_url(provider, llm_format)
-        timeout_seconds = _read_float("RIGEL_LLM_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
-        temperature = _read_optional_float("RIGEL_LLM_TEMPERATURE")
-        max_output_tokens = _read_optional_int("RIGEL_LLM_MAX_OUTPUT_TOKENS")
-        system_prompt = _read_env("RIGEL_LLM_SYSTEM_PROMPT") or DEFAULT_SYSTEM_PROMPT
+        config_data = _read_llm_config(repository_path)
+        provider = _read_string(config_data, "provider", default="openai").lower()
+        llm_format = _read_format(config_data, provider)
+        model = _require_string(config_data, "model")
+        api_key = _require_string(config_data, "api_key")
+        base_url = _read_base_url(config_data, provider, llm_format)
+        timeout_seconds = _read_float(config_data, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
+        temperature = _read_optional_float(config_data, "temperature")
+        max_output_tokens = _read_optional_int(config_data, "max_output_tokens")
+        system_prompt = _read_string(config_data, "system_prompt", default=DEFAULT_SYSTEM_PROMPT)
 
         return cls(
             provider=provider,
@@ -76,17 +76,34 @@ class LLMConfig:
         )
 
 
-def _read_provider() -> str:
-    return (_read_env("RIGEL_LLM_PROVIDER") or "openai").lower()
+def _read_llm_config(repository_path: Path) -> dict[str, Any]:
+    config_path = repository_path / LLM_CONFIG_RELATIVE_PATH
+    if not config_path.exists():
+        raise LLMConfigurationError(f"缺少 LLM 配置文件：{config_path}")
+
+    try:
+        config_document = json.loads(config_path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise LLMConfigurationError(f"读取 LLM 配置文件失败：{config_path}") from error
+    except JSONDecodeError as error:
+        raise LLMConfigurationError(f"LLM 配置文件不是合法 JSON：{config_path}") from error
+
+    if not isinstance(config_document, dict):
+        raise LLMConfigurationError("LLM 配置文件根节点必须是 JSON 对象")
+
+    llm_config = config_document.get(LLM_CONFIG_SECTION_NAME)
+    if not isinstance(llm_config, dict):
+        raise LLMConfigurationError("LLM 配置文件必须包含对象字段：llm")
+    return llm_config
 
 
-def _read_format(provider: str) -> LLMFormat:
-    format_value = (_read_env("RIGEL_LLM_FORMAT") or _default_format(provider).value).lower()
+def _read_format(config_data: dict[str, Any], provider: str) -> LLMFormat:
+    format_value = _read_string(config_data, "format", default=_default_format(provider).value).lower()
     try:
         return LLMFormat(format_value)
     except ValueError as error:
         supported_values = ", ".join(llm_format.value for llm_format in LLMFormat)
-        raise LLMConfigurationError(f"RIGEL_LLM_FORMAT 仅支持：{supported_values}") from error
+        raise LLMConfigurationError(f"llm.format 仅支持：{supported_values}") from error
 
 
 def _default_format(provider: str) -> LLMFormat:
@@ -95,88 +112,68 @@ def _default_format(provider: str) -> LLMFormat:
     return LLMFormat.OPENAI_RESPONSES
 
 
-def _read_api_key(provider: str) -> str:
-    api_key = _read_env("RIGEL_LLM_API_KEY")
-    if api_key:
-        return api_key
-
-    provider_key_names = {
-        "openai": ("OPENAI_API_KEY",),
-        "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-    }
-    fallback_key_names = provider_key_names.get(provider, ())
-    for key_name in fallback_key_names:
-        value = _read_env(key_name)
-        if value:
-            return value
-
-    fallback_names = ", ".join(("RIGEL_LLM_API_KEY", *fallback_key_names))
-    raise LLMConfigurationError(f"缺少 LLM API Key，请配置 {fallback_names}")
-
-
-def _read_base_url(provider: str, format: LLMFormat) -> str | None:
-    custom_base_url = _read_env("RIGEL_LLM_BASE_URL")
+def _read_base_url(config_data: dict[str, Any], provider: str, format: LLMFormat) -> str | None:
+    custom_base_url = _read_string(config_data, "base_url")
     if custom_base_url:
         return custom_base_url
 
     if provider == "google" and format is LLMFormat.GOOGLE_GENERATE_CONTENT:
         return DEFAULT_GOOGLE_BASE_URL
 
-    openai_base_url = _read_env("OPENAI_BASE_URL")
-    if openai_base_url:
-        return openai_base_url
-
     if provider != "openai":
-        raise LLMConfigurationError("自定义提供商必须配置 RIGEL_LLM_BASE_URL")
+        raise LLMConfigurationError("自定义提供商必须配置 llm.base_url")
     return None
 
 
-def _require_env(name: str) -> str:
-    value = _read_env(name)
+def _require_string(config_data: dict[str, Any], name: str) -> str:
+    value = _read_string(config_data, name)
     if value:
         return value
-    raise LLMConfigurationError(f"缺少必要环境变量：{name}")
+    raise LLMConfigurationError(f"缺少必要配置：llm.{name}")
 
 
-def _read_env(name: str) -> str | None:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    stripped_value = value.strip()
-    return stripped_value or None
-
-
-def _read_float(name: str, default: float) -> float:
-    value = _read_env(name)
+def _read_string(config_data: dict[str, Any], name: str, *, default: str | None = None) -> str | None:
+    value = config_data.get(name)
     if value is None:
         return default
-    try:
-        parsed_value = float(value)
-    except ValueError as error:
-        raise LLMConfigurationError(f"{name} 必须是数字") from error
+    if not isinstance(value, str):
+        raise LLMConfigurationError(f"llm.{name} 必须是字符串")
+    stripped_value = value.strip()
+    return stripped_value or default
+
+
+def _read_float(config_data: dict[str, Any], name: str, default: float) -> float:
+    value = config_data.get(name)
+    if value is None:
+        return default
+    if not _is_number(value):
+        raise LLMConfigurationError(f"llm.{name} 必须是数字")
+    parsed_value = float(value)
     if parsed_value <= 0:
-        raise LLMConfigurationError(f"{name} 必须大于 0")
+        raise LLMConfigurationError(f"llm.{name} 必须大于 0")
     return parsed_value
 
 
-def _read_optional_float(name: str) -> float | None:
-    value = _read_env(name)
+def _read_optional_float(config_data: dict[str, Any], name: str) -> float | None:
+    value = config_data.get(name)
     if value is None:
         return None
-    try:
-        return float(value)
-    except ValueError as error:
-        raise LLMConfigurationError(f"{name} 必须是数字") from error
+    if not _is_number(value):
+        raise LLMConfigurationError(f"llm.{name} 必须是数字")
+    return float(value)
 
 
-def _read_optional_int(name: str) -> int | None:
-    value = _read_env(name)
+def _read_optional_int(config_data: dict[str, Any], name: str) -> int | None:
+    value = config_data.get(name)
     if value is None:
         return None
-    try:
-        parsed_value = int(value)
-    except ValueError as error:
-        raise LLMConfigurationError(f"{name} 必须是整数") from error
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LLMConfigurationError(f"llm.{name} 必须是整数")
+    parsed_value = value
     if parsed_value <= 0:
-        raise LLMConfigurationError(f"{name} 必须大于 0")
+        raise LLMConfigurationError(f"llm.{name} 必须大于 0")
     return parsed_value
+
+
+def _is_number(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int | float)

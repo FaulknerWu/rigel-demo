@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -14,14 +12,13 @@ from rigel_demo.web.app import create_app
 
 class WebAppLLMTest(TestCase):
     def test_chat_returns_configuration_error_when_llm_is_missing(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            with TemporaryDirectory() as workspace:
-                client = TestClient(create_app(Path(workspace)))
+        with TemporaryDirectory() as workspace:
+            client = TestClient(create_app(Path(workspace)))
 
-                response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "你好"}]})
+            response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "你好"}]})
 
         self.assertEqual(response.status_code, 503)
-        self.assertIn("RIGEL_LLM_MODEL", response.json()["detail"])
+        self.assertIn(".rigel/config.json", response.json()["detail"])
 
     def test_chat_uses_injected_llm_client(self) -> None:
         fake_llm = _FakeRigelLLM()

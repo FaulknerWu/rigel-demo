@@ -16,7 +16,7 @@ __pycache__/
 .venv/
 .env
 .env.*
-!.env.example
+.rigel/config.json
 
 # Frontend build dependencies
 node_modules/

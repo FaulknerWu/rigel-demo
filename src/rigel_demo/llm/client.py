@@ -230,7 +230,7 @@ def _extract_google_output_text(response_body: dict[str, Any]) -> str:
 def _require_base_url(config: LLMConfig) -> str:
     if config.base_url:
         return config.base_url
-    raise LLMConfigurationError("当前请求格式必须配置 RIGEL_LLM_BASE_URL")
+    raise LLMConfigurationError("当前请求格式必须配置 llm.base_url")
 
 
 def _require_http_client(http_client: httpx.Client | None) -> httpx.Client:
