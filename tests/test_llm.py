@@ -7,36 +7,33 @@ from types import SimpleNamespace
 from unittest import TestCase
 
 from rigel_demo.llm import (
-    DEFAULT_GOOGLE_BASE_URL,
     LLMConfig,
     LLMConfigSection,
     LLMConfigurationError,
-    LLMFormat,
     LLMMessage,
     RigelLLM,
 )
 
 
 class LLMConfigTest(TestCase):
-    def test_google_provider_uses_native_generate_content_defaults(self) -> None:
+    def test_openai_provider_uses_chat_completions_defaults(self) -> None:
         with TemporaryDirectory() as workspace:
             repository_path = _write_llm_config(
                 Path(workspace),
                 {
-                    "provider": "google",
-                    "model": "gemini-3-flash-preview",
-                    "api_key": "gemini-key",
+                    "provider": "openai",
+                    "model": "gpt-5.2",
+                    "api_key": "openai-key",
                 },
             )
 
             config = LLMConfig.from_repository(repository_path)
 
-        self.assertEqual(config.provider, "google")
+        self.assertEqual(config.provider, "openai")
         self.assertEqual(config.section, LLMConfigSection.CHAT)
-        self.assertEqual(config.format, LLMFormat.GOOGLE_GENERATE_CONTENT)
-        self.assertEqual(config.model, "gemini-3-flash-preview")
-        self.assertEqual(config.api_key, "gemini-key")
-        self.assertEqual(config.base_url, DEFAULT_GOOGLE_BASE_URL)
+        self.assertEqual(config.model, "gpt-5.2")
+        self.assertEqual(config.api_key, "openai-key")
+        self.assertIsNone(config.base_url)
 
     def test_summary_section_reads_independent_model(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -48,13 +45,11 @@ class LLMConfigTest(TestCase):
                     {
                         "chat": {
                             "provider": "openai",
-                            "format": "openai_responses",
                             "model": "gpt-5.2",
                             "api_key": "chat-key",
                         },
                         "summary": {
                             "provider": "openai",
-                            "format": "openai_responses",
                             "model": "gpt-5.2-mini",
                             "api_key": "summary-key",
                             "max_output_tokens": 256,
@@ -74,13 +69,12 @@ class LLMConfigTest(TestCase):
         self.assertEqual(config.max_output_tokens, 256)
         self.assertIn("摘要生成器", config.system_prompt)
 
-    def test_openai_responses_config_supports_custom_base_url(self) -> None:
+    def test_chat_completions_config_supports_custom_base_url(self) -> None:
         with TemporaryDirectory() as workspace:
             repository_path = _write_llm_config(
                 Path(workspace),
                 {
                     "provider": "openai",
-                    "format": "openai_responses",
                     "model": "gpt-custom",
                     "api_key": "openai-key",
                     "base_url": "https://example.test/v1",
@@ -91,7 +85,6 @@ class LLMConfigTest(TestCase):
             config = LLMConfig.from_repository(repository_path)
 
         self.assertEqual(config.provider, "openai")
-        self.assertEqual(config.format, LLMFormat.OPENAI_RESPONSES)
         self.assertEqual(config.base_url, "https://example.test/v1")
         self.assertEqual(config.max_output_tokens, 1024)
 
@@ -101,7 +94,6 @@ class LLMConfigTest(TestCase):
                 Path(workspace),
                 {
                     "provider": "acme",
-                    "format": "openai_chat",
                     "model": "acme-chat",
                     "api_key": "acme-key",
                 },
@@ -110,13 +102,12 @@ class LLMConfigTest(TestCase):
             with self.assertRaisesRegex(LLMConfigurationError, "chat.base_url"):
                 LLMConfig.from_repository(repository_path)
 
-    def test_custom_provider_accepts_configured_format_key_and_base_url(self) -> None:
+    def test_custom_provider_accepts_base_url(self) -> None:
         with TemporaryDirectory() as workspace:
             repository_path = _write_llm_config(
                 Path(workspace),
                 {
                     "provider": "acme",
-                    "format": "openai_chat",
                     "model": "acme-chat",
                     "api_key": "acme-key",
                     "base_url": "https://acme.example/v1",
@@ -126,7 +117,6 @@ class LLMConfigTest(TestCase):
             config = LLMConfig.from_repository(repository_path)
 
         self.assertEqual(config.provider, "acme")
-        self.assertEqual(config.format, LLMFormat.OPENAI_CHAT)
         self.assertEqual(config.api_key, "acme-key")
         self.assertEqual(config.base_url, "https://acme.example/v1")
 
@@ -144,49 +134,26 @@ class LLMConfigTest(TestCase):
 
 
 class RigelLLMTest(TestCase):
-    def test_generate_reply_uses_openai_responses_format(self) -> None:
+    def test_generate_reply_uses_chat_completions_request_shape(self) -> None:
         fake_client = _FakeOpenAIClient()
-        config = _config(format=LLMFormat.OPENAI_RESPONSES)
-        llm = RigelLLM(config, openai_client=fake_client)
-
-        reply = llm.generate_reply([LLMMessage(role="user", content="分析 Service")])
-
-        self.assertEqual(reply, "Responses 回复")
-        self.assertEqual(fake_client.responses.request_body["model"], "test-model")
-        self.assertEqual(fake_client.responses.request_body["instructions"], "系统提示")
-        self.assertEqual(fake_client.responses.request_body["input"], [{"role": "user", "content": "分析 Service"}])
-
-    def test_generate_reply_uses_openai_chat_format(self) -> None:
-        fake_client = _FakeOpenAIClient()
-        config = _config(format=LLMFormat.OPENAI_CHAT)
+        config = _config(temperature=0, max_output_tokens=300)
         llm = RigelLLM(config, openai_client=fake_client)
 
         reply = llm.generate_reply([LLMMessage(role="user", content="分析 Controller")])
 
         self.assertEqual(reply, "Chat 回复")
         self.assertEqual(
-            fake_client.chat.completions.request_body["messages"],
-            [
-                {"role": "system", "content": "系统提示"},
-                {"role": "user", "content": "分析 Controller"},
-            ],
+            fake_client.chat.completions.request_body,
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": "系统提示"},
+                    {"role": "user", "content": "分析 Controller"},
+                ],
+                "temperature": 0,
+                "max_completion_tokens": 300,
+            },
         )
-
-    def test_generate_reply_uses_google_generate_content_format(self) -> None:
-        fake_http_client = _FakeGoogleHttpClient()
-        config = _config(format=LLMFormat.GOOGLE_GENERATE_CONTENT, provider="google", base_url=DEFAULT_GOOGLE_BASE_URL)
-        llm = RigelLLM(config, http_client=fake_http_client)
-
-        reply = llm.generate_reply([LLMMessage(role="user", content="分析 RepositoryIndexer")])
-
-        self.assertEqual(reply, "Google 回复")
-        self.assertEqual(fake_http_client.path, "/models/test-model:generateContent")
-        self.assertEqual(fake_http_client.headers["x-goog-api-key"], "test-key")
-        self.assertEqual(
-            fake_http_client.json_body["contents"],
-            [{"role": "user", "parts": [{"text": "分析 RepositoryIndexer"}]}],
-        )
-        self.assertEqual(fake_http_client.json_body["system_instruction"], {"parts": [{"text": "系统提示"}]})
 
 
 def _write_llm_config(
@@ -203,34 +170,26 @@ def _write_llm_config(
 
 def _config(
     *,
-    format: LLMFormat,
     provider: str = "openai",
     base_url: str | None = None,
+    temperature: float | None = None,
+    max_output_tokens: int | None = None,
 ) -> LLMConfig:
     return LLMConfig(
         provider=provider,
-        format=format,
         model="test-model",
         api_key="test-key",
         base_url=base_url,
         timeout_seconds=30,
         system_prompt="系统提示",
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
     )
 
 
 class _FakeOpenAIClient:
     def __init__(self) -> None:
-        self.responses = _FakeResponsesResource()
         self.chat = SimpleNamespace(completions=_FakeChatCompletionsResource())
-
-
-class _FakeResponsesResource:
-    def __init__(self) -> None:
-        self.request_body: dict[str, object] = {}
-
-    def create(self, **request_body: object) -> SimpleNamespace:
-        self.request_body = request_body
-        return SimpleNamespace(output_text="Responses 回复")
 
 
 class _FakeChatCompletionsResource:
@@ -241,32 +200,3 @@ class _FakeChatCompletionsResource:
         self.request_body = request_body
         message = SimpleNamespace(content="Chat 回复")
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
-
-
-class _FakeGoogleHttpClient:
-    def __init__(self) -> None:
-        self.path = ""
-        self.headers: dict[str, str] = {}
-        self.json_body: dict[str, object] = {}
-
-    def post(self, path: str, *, headers: dict[str, str], json: dict[str, object]) -> "_FakeGoogleResponse":
-        self.path = path
-        self.headers = headers
-        self.json_body = json
-        return _FakeGoogleResponse()
-
-
-class _FakeGoogleResponse:
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict[str, object]:
-        return {
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [{"text": "Google 回复"}],
-                    }
-                }
-            ]
-        }

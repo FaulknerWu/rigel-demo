@@ -7,7 +7,7 @@ from rigel_demo.core import EdgeType, NodeType
 from rigel_demo.embedding import EmbeddingConfig, EmbeddingFormat
 from rigel_demo.indexing import repository_indexer
 from rigel_demo.java.requests import DEFAULT_LSP_TIMEOUT_SECONDS
-from rigel_demo.llm import LLMConfig, LLMConfigSection, LLMFormat, LLMMessage
+from rigel_demo.llm import LLMConfig, LLMConfigSection, LLMMessage
 
 
 class RepositoryIndexerTest(TestCase):
@@ -65,7 +65,6 @@ class _FakeSummaryClient:
     def __init__(self) -> None:
         self.config = LLMConfig(
             provider="openai",
-            format=LLMFormat.OPENAI_RESPONSES,
             model="summary-model",
             api_key="fake-key",
             base_url=None,

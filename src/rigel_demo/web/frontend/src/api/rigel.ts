@@ -72,7 +72,6 @@ export interface ApiChatResponse {
   message: ApiChatMessage;
   model: string;
   provider: string;
-  format: string;
 }
 
 export interface GraphNode {

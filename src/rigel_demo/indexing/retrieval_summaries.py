@@ -14,15 +14,13 @@ from rigel_demo.llm import LLMMessage, RigelLLM
 
 RETRIEVAL_SUMMARY_PURPOSE = "retrieval"
 SUMMARY_DESCRIBES_KIND = "retrieval-summary"
-SUMMARY_PROVENANCE = "embedding"
 SUMMARY_SOURCE_HASH_PREFIX = "sha256:"
-LOCAL_STRUCTURE_SUMMARY_MODEL = "rigel-local-structure-summary"
 
 _SUMMARY_TARGET_TYPES = {NodeType.MODULE, NodeType.FILE, NodeType.ENTITY}
 
 
 class SummaryEmbeddingClient(Protocol):
-    """Summary 生成依赖的最小 Embedding 客户端接口。"""
+    """Summary 生成依赖的 Embedding 客户端接口。"""
 
     @property
     def config(self) -> object: ...
@@ -31,7 +29,7 @@ class SummaryEmbeddingClient(Protocol):
 
 
 class SummaryTextClient(Protocol):
-    """Summary 文本生成依赖的最小 LLM 客户端接口。"""
+    """Summary 文本生成依赖的 LLM 客户端接口。"""
 
     @property
     def config(self) -> object: ...
@@ -43,7 +41,7 @@ def attach_retrieval_summaries(
     graph: GraphIR,
     *,
     embedding_client: SummaryEmbeddingClient | RigelEmbedding,
-    summary_client: SummaryTextClient | RigelLLM | None = None,
+    summary_client: SummaryTextClient | RigelLLM,
 ) -> GraphIR:
     """为可召回节点追加 Summary 节点和 DESCRIBES 边。"""
 
@@ -63,7 +61,7 @@ def attach_retrieval_summaries(
         raise ValueError("Embedding 返回数量与 Summary 目标数量不一致")
 
     embedding_model = str(getattr(embedding_client.config, "model"))
-    summary_model = _summary_model(summary_client)
+    summary_model = str(getattr(summary_client.config, "model"))
     for target_node, summary_text, embedding in zip(target_nodes, summary_texts, embeddings, strict=True):
         summary = build_retrieval_summary(
             target_node,
@@ -81,7 +79,6 @@ def attach_retrieval_summaries(
             summary.summary_id,
             target_node.id,
             kind=SUMMARY_DESCRIBES_KIND,
-            provenance=SUMMARY_PROVENANCE,
             confidence=1.0,
         )
         if describes_edge.id not in existing_edge_ids:
@@ -128,10 +125,7 @@ def cosine_similarity(left: Iterable[float], right: Iterable[float]) -> float:
     return sum(left * right for left, right in zip(left_values, right_values, strict=True)) / (left_norm * right_norm)
 
 
-def _generate_summary_text(target_node: GraphNode, *, summary_client: SummaryTextClient | RigelLLM | None) -> str:
-    if summary_client is None:
-        return _local_summary_text(target_node)
-
+def _generate_summary_text(target_node: GraphNode, *, summary_client: SummaryTextClient | RigelLLM) -> str:
     summary_text = _normalize_summary_text(
         summary_client.generate_reply([LLMMessage(role="user", content=_summary_prompt(target_node))])
     )
@@ -154,12 +148,6 @@ def _summary_prompt(target_node: GraphNode) -> str:
 
 def _normalize_summary_text(text: str) -> str:
     return " ".join(line.strip() for line in text.splitlines() if line.strip())
-
-
-def _summary_model(summary_client: SummaryTextClient | RigelLLM | None) -> str:
-    if summary_client is None:
-        return LOCAL_STRUCTURE_SUMMARY_MODEL
-    return str(getattr(summary_client.config, "model"))
 
 
 def _local_summary_text(target_node: GraphNode) -> str:

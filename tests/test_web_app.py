@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from rigel_demo.core import EdgeType, Entity, GraphEdge, GraphIR, Module, Repository
 from rigel_demo.embedding import EmbeddingConfig, EmbeddingFormat
 from rigel_demo.indexing.retrieval_summaries import attach_retrieval_summaries
-from rigel_demo.llm import LLMConfig, LLMConfigSection, LLMFormat, LLMMessage
+from rigel_demo.llm import LLMConfig, LLMConfigSection, LLMMessage
 from rigel_demo.storage import FalkorDBConfig, FalkorDBStore
 from rigel_demo.web.app import create_app
 
@@ -102,7 +102,6 @@ class _FakeRigelLLM:
     def __init__(self) -> None:
         self.config = LLMConfig(
             provider="openai",
-            format=LLMFormat.OPENAI_CHAT,
             model="fake-model",
             api_key="fake-key",
             base_url=None,
@@ -144,7 +143,6 @@ class _FakeSummaryClient:
     def __init__(self) -> None:
         self.config = LLMConfig(
             provider="openai",
-            format=LLMFormat.OPENAI_RESPONSES,
             model="summary-model",
             api_key="fake-key",
             base_url=None,

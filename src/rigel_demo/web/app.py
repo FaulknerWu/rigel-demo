@@ -179,7 +179,6 @@ def create_app(
             "message": {"role": "assistant", "content": reply},
             "model": active_chat_client.config.model,
             "provider": active_chat_client.config.provider,
-            "format": active_chat_client.config.format.value,
         }
 
     @app.get("/", response_model=None)
@@ -469,7 +468,6 @@ def _llm_status(llm_client: RigelLLM | None, configuration_error: str | None) ->
     return {
         "configured": True,
         "provider": config.provider,
-        "format": config.format.value,
         "model": config.model,
         "base_url": config.base_url,
     }

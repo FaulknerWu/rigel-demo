@@ -1,4 +1,4 @@
-"""从仓库 `.rigel/config.json` 加载功能级 LLM 运行配置。"""
+"""从仓库 `.rigel/config.json` 加载功能级 Chat Completions 运行配置。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from typing import Any
 RIGEL_CONFIG_DIRECTORY_NAME = ".rigel"
 RIGEL_CONFIG_FILE_NAME = "config.json"
 LLM_CONFIG_RELATIVE_PATH = Path(RIGEL_CONFIG_DIRECTORY_NAME) / RIGEL_CONFIG_FILE_NAME
-DEFAULT_GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_CHAT_SYSTEM_PROMPT = (
     "你是 Rigel 的代码图谱分析助手。回答时优先基于用户给出的代码图谱、仓库上下文与当前问题，"
@@ -32,24 +31,15 @@ class LLMConfigSection(StrEnum):
     SUMMARY = "summary"
 
 
-class LLMFormat(StrEnum):
-    """LLM 请求格式。"""
-
-    OPENAI_CHAT = "openai_chat"
-    GOOGLE_GENERATE_CONTENT = "google_generate_content"
-    OPENAI_RESPONSES = "openai_responses"
-
-
 class LLMConfigurationError(ValueError):
     """LLM 配置不可用。"""
 
 
 @dataclass(frozen=True, slots=True)
 class LLMConfig:
-    """LLM 客户端所需的最小配置。"""
+    """Chat Completions 客户端所需配置。"""
 
     provider: str
-    format: LLMFormat
     model: str
     api_key: str
     base_url: str | None
@@ -68,32 +58,21 @@ class LLMConfig:
         """从目标仓库 `.rigel/config.json` 读取指定功能的 LLM 配置。"""
 
         normalized_section = _normalize_section(section)
-        config_data = _read_llm_config(repository_path, normalized_section)
-        provider = _read_string(config_data, "provider", normalized_section, default="openai").lower()
-        llm_format = _read_format(config_data, provider, normalized_section)
-        model = _require_string(config_data, "model", normalized_section)
-        api_key = _require_string(config_data, "api_key", normalized_section)
-        base_url = _read_base_url(config_data, provider, llm_format, normalized_section)
-        timeout_seconds = _read_float(config_data, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS, normalized_section)
-        temperature = _read_optional_float(config_data, "temperature", normalized_section)
-        max_output_tokens = _read_optional_int(config_data, "max_output_tokens", normalized_section)
-        system_prompt = _read_string(
-            config_data,
-            "system_prompt",
-            normalized_section,
-            default=_default_system_prompt(normalized_section),
+        reader = _LLMConfigReader(
+            data=_read_llm_config(repository_path, normalized_section),
+            section=normalized_section,
         )
+        provider = reader.string("provider", default="openai").lower()
 
         return cls(
             provider=provider,
-            format=llm_format,
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            timeout_seconds=timeout_seconds,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
+            model=reader.required_string("model"),
+            api_key=reader.required_string("api_key"),
+            base_url=_read_base_url(reader, provider),
+            timeout_seconds=reader.positive_float("timeout_seconds", default=DEFAULT_TIMEOUT_SECONDS),
+            system_prompt=reader.string("system_prompt", default=_default_system_prompt(normalized_section)),
+            temperature=reader.optional_float("temperature"),
+            max_output_tokens=reader.optional_positive_int("max_output_tokens"),
             section=normalized_section,
         )
 
@@ -127,19 +106,62 @@ def _read_llm_config(repository_path: Path, section: LLMConfigSection) -> dict[s
     return llm_config
 
 
-def _read_format(config_data: dict[str, Any], provider: str, section: LLMConfigSection) -> LLMFormat:
-    format_value = _read_string(config_data, "format", section, default=_default_format(provider).value).lower()
-    try:
-        return LLMFormat(format_value)
-    except ValueError as error:
-        supported_values = ", ".join(llm_format.value for llm_format in LLMFormat)
-        raise LLMConfigurationError(f"{section.value}.format 仅支持：{supported_values}") from error
+@dataclass(frozen=True, slots=True)
+class _LLMConfigReader:
+    """集中处理字段类型校验。"""
 
+    data: dict[str, Any]
+    section: LLMConfigSection
 
-def _default_format(provider: str) -> LLMFormat:
-    if provider == "google":
-        return LLMFormat.GOOGLE_GENERATE_CONTENT
-    return LLMFormat.OPENAI_RESPONSES
+    def string(self, name: str, *, default: str) -> str:
+        return self.optional_string(name) or default
+
+    def required_string(self, name: str) -> str:
+        value = self.optional_string(name)
+        if value:
+            return value
+        raise LLMConfigurationError(f"缺少必要配置：{self.field_path(name)}")
+
+    def optional_string(self, name: str) -> str | None:
+        value = self.data.get(name)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise LLMConfigurationError(f"{self.field_path(name)} 必须是字符串")
+        stripped_value = value.strip()
+        return stripped_value or None
+
+    def positive_float(self, name: str, *, default: float) -> float:
+        value = self.data.get(name)
+        if value is None:
+            return default
+        if not _is_number(value):
+            raise LLMConfigurationError(f"{self.field_path(name)} 必须是数字")
+        parsed_value = float(value)
+        if parsed_value <= 0:
+            raise LLMConfigurationError(f"{self.field_path(name)} 必须大于 0")
+        return parsed_value
+
+    def optional_float(self, name: str) -> float | None:
+        value = self.data.get(name)
+        if value is None:
+            return None
+        if not _is_number(value):
+            raise LLMConfigurationError(f"{self.field_path(name)} 必须是数字")
+        return float(value)
+
+    def optional_positive_int(self, name: str) -> int | None:
+        value = self.data.get(name)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise LLMConfigurationError(f"{self.field_path(name)} 必须是整数")
+        if value <= 0:
+            raise LLMConfigurationError(f"{self.field_path(name)} 必须大于 0")
+        return value
+
+    def field_path(self, name: str) -> str:
+        return f"{self.section.value}.{name}"
 
 
 def _default_system_prompt(section: LLMConfigSection) -> str:
@@ -148,78 +170,14 @@ def _default_system_prompt(section: LLMConfigSection) -> str:
     return DEFAULT_CHAT_SYSTEM_PROMPT
 
 
-def _read_base_url(
-    config_data: dict[str, Any],
-    provider: str,
-    format: LLMFormat,
-    section: LLMConfigSection,
-) -> str | None:
-    custom_base_url = _read_string(config_data, "base_url", section)
+def _read_base_url(reader: _LLMConfigReader, provider: str) -> str | None:
+    custom_base_url = reader.optional_string("base_url")
     if custom_base_url:
         return custom_base_url
 
-    if provider == "google" and format is LLMFormat.GOOGLE_GENERATE_CONTENT:
-        return DEFAULT_GOOGLE_BASE_URL
-
     if provider != "openai":
-        raise LLMConfigurationError(f"自定义提供商必须配置 {section.value}.base_url")
+        raise LLMConfigurationError(f"自定义 Chat Completions 提供商必须配置 {reader.field_path('base_url')}")
     return None
-
-
-def _require_string(config_data: dict[str, Any], name: str, section: LLMConfigSection) -> str:
-    value = _read_string(config_data, name, section)
-    if value:
-        return value
-    raise LLMConfigurationError(f"缺少必要配置：{section.value}.{name}")
-
-
-def _read_string(
-    config_data: dict[str, Any],
-    name: str,
-    section: LLMConfigSection,
-    *,
-    default: str | None = None,
-) -> str | None:
-    value = config_data.get(name)
-    if value is None:
-        return default
-    if not isinstance(value, str):
-        raise LLMConfigurationError(f"{section.value}.{name} 必须是字符串")
-    stripped_value = value.strip()
-    return stripped_value or default
-
-
-def _read_float(config_data: dict[str, Any], name: str, default: float, section: LLMConfigSection) -> float:
-    value = config_data.get(name)
-    if value is None:
-        return default
-    if not _is_number(value):
-        raise LLMConfigurationError(f"{section.value}.{name} 必须是数字")
-    parsed_value = float(value)
-    if parsed_value <= 0:
-        raise LLMConfigurationError(f"{section.value}.{name} 必须大于 0")
-    return parsed_value
-
-
-def _read_optional_float(config_data: dict[str, Any], name: str, section: LLMConfigSection) -> float | None:
-    value = config_data.get(name)
-    if value is None:
-        return None
-    if not _is_number(value):
-        raise LLMConfigurationError(f"{section.value}.{name} 必须是数字")
-    return float(value)
-
-
-def _read_optional_int(config_data: dict[str, Any], name: str, section: LLMConfigSection) -> int | None:
-    value = config_data.get(name)
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise LLMConfigurationError(f"{section.value}.{name} 必须是整数")
-    parsed_value = value
-    if parsed_value <= 0:
-        raise LLMConfigurationError(f"{section.value}.{name} 必须大于 0")
-    return parsed_value
 
 
 def _is_number(value: object) -> bool:
