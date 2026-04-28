@@ -362,43 +362,6 @@ wheels = [
 ]
 
 [[package]]
-name = "labs"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "falkordblite" },
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "multilspy" },
-    { name = "openai" },
-    { name = "pydantic" },
-    { name = "tree-sitter" },
-    { name = "tree-sitter-java" },
-    { name = "uvicorn" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "falkordblite", specifier = ">=0.9.0" },
-    { name = "fastapi", specifier = ">=0.136.1" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "multilspy", specifier = ">=0.0.15" },
-    { name = "openai", specifier = ">=2.32.0" },
-    { name = "pydantic", specifier = ">=2.13.3" },
-    { name = "tree-sitter", specifier = ">=0.25.2" },
-    { name = "tree-sitter-java", specifier = ">=0.23.5" },
-    { name = "uvicorn", specifier = ">=0.46.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.0.3" }]
-
-[[package]]
 name = "lsprotocol"
 version = "2023.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -644,6 +607,41 @@ sdist = { url = "https://files.pythonhosted.org/packages/63/70/2bf7780ad2d390a8d
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f9/9b/335f9764261e915ed497fcdeb11df5dfd6f7bf257d4a6a2a686d80da4d54/requests-2.32.3-py3-none-any.whl", hash = "sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6", size = 64928, upload-time = "2024-05-29T15:37:47.027Z" },
 ]
+
+[[package]]
+name = "rigel-demo"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "falkordblite" },
+    { name = "fastapi" },
+    { name = "multilspy" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-java" },
+    { name = "uvicorn" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "falkordblite", specifier = ">=0.9.0" },
+    { name = "fastapi", specifier = ">=0.136.1" },
+    { name = "multilspy", specifier = ">=0.0.15" },
+    { name = "openai", specifier = ">=2.32.0" },
+    { name = "pydantic", specifier = ">=2.13.3" },
+    { name = "tree-sitter", specifier = ">=0.25.2" },
+    { name = "tree-sitter-java", specifier = ">=0.23.5" },
+    { name = "uvicorn", specifier = ">=0.46.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.3" }]
 
 [[package]]
 name = "setuptools"
