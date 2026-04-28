@@ -381,4 +381,3 @@ def _split_method_owner_and_name(qualified_name: str) -> tuple[str, str]:
     method_name = method_signature.split("(", 1)[0]
     return owner_name, method_name
 
-

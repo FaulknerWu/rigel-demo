@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ArrowUp, Bot, Brain, Hammer, Plus, Search, Sparkles, User } from 'lucide-react';
-import { searchNodes, type GraphNode } from '../api/rigel';
+import { sendChatMessage, type ChatMessage } from '../api/rigel';
 
 interface Message {
   role: 'user' | 'agent';
@@ -10,24 +10,26 @@ interface Message {
 export default function ChatPanel() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
-  const [isSearching, setIsSearching] = useState(false);
+  const [isResponding, setIsResponding] = useState(false);
 
   const handleSend = async () => {
     const query = input.trim();
-    if (!query || isSearching) return;
+    if (!query || isResponding) return;
 
-    setMessages((currentMessages) => [...currentMessages, { role: 'user', content: query }]);
+    // 先把用户消息写入本地状态，再用同一份历史请求后端，保证界面与模型上下文一致。
+    const nextMessages: Message[] = [...messages, { role: 'user', content: query }];
+    setMessages(nextMessages);
     setInput('');
-    setIsSearching(true);
+    setIsResponding(true);
 
     try {
-      const nodes = await searchNodes(query);
-      setMessages((currentMessages) => [...currentMessages, { role: 'agent', content: formatSearchResult(query, nodes) }]);
+      const responseMessage = await sendChatMessage(nextMessages.map(toChatMessage));
+      setMessages((currentMessages) => [...currentMessages, { role: 'agent', content: responseMessage.content }]);
     } catch (error) {
-      const message = error instanceof Error ? error.message : '搜索失败';
-      setMessages((currentMessages) => [...currentMessages, { role: 'agent', content: `未能完成图谱搜索：${message}` }]);
+      const message = error instanceof Error ? error.message : '请求失败';
+      setMessages((currentMessages) => [...currentMessages, { role: 'agent', content: `未能完成模型调用：${message}` }]);
     } finally {
-      setIsSearching(false);
+      setIsResponding(false);
     }
   };
 
@@ -60,12 +62,12 @@ export default function ChatPanel() {
                 </div>
               </div>
             ))}
-            {isSearching && (
+            {isResponding && (
               <div className="flex gap-3">
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-black text-white">
                   <Bot className="h-4 w-4" />
                 </div>
-                <div className="rounded-2xl px-4 py-3 text-[13px] leading-relaxed text-slate-500">正在搜索图谱...</div>
+                <div className="rounded-2xl px-4 py-3 text-[13px] leading-relaxed text-slate-500">正在调用模型...</div>
               </div>
             )}
           </div>
@@ -101,9 +103,9 @@ export default function ChatPanel() {
               </button>
               <button
                 onClick={handleSend}
-                disabled={!input.trim() || isSearching}
+                disabled={!input.trim() || isResponding}
                 className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
-                  input.trim() && !isSearching ? 'bg-black text-white' : 'bg-[#f4f4f4] text-[#c4c4c4]'
+                  input.trim() && !isResponding ? 'bg-black text-white' : 'bg-[#f4f4f4] text-[#c4c4c4]'
                 }`}
                 aria-label="发送消息"
               >
@@ -117,11 +119,10 @@ export default function ChatPanel() {
   );
 }
 
-function formatSearchResult(query: string, nodes: GraphNode[]): string {
-  if (nodes.length === 0) {
-    return `没有在代码图谱中找到与“${query}”相关的节点。`;
-  }
-
-  const lines = nodes.map((node, index) => `${index + 1}. ${node.name}（${node.group}）`);
-  return `已在图谱中找到 ${nodes.length} 个与“${query}”相关的节点：\n${lines.join('\n')}`;
+function toChatMessage(message: Message): ChatMessage {
+  // 前端用 agent 命名展示角色；API 仍按通用 LLM 协议传 assistant，避免泄露 UI 术语。
+  return {
+    role: message.role === 'agent' ? 'assistant' : 'user',
+    content: message.content,
+  };
 }

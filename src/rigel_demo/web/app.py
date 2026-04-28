@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from rigel_demo.cli import (
     DEFAULT_GRAPH_NAME,
@@ -16,16 +17,25 @@ from rigel_demo.cli import (
     RIGEL_WORKSPACE_DIRECTORY_NAME,
     WORKSPACE_STATE_FILE_NAME,
 )
+from rigel_demo.llm import (
+    LLMConfig,
+    LLMConfigurationError,
+    LLMMessage,
+    LLMRequestError,
+    LLMResponseError,
+    RigelLLM,
+)
 from rigel_demo.storage.falkordb_store import FalkorDBConfig, FalkorDBStore
 
 DEFAULT_GRAPH_LIMIT = 500
 DEFAULT_SEARCH_LIMIT = 50
+DEFAULT_CHAT_CONTEXT_LIMIT = 8
 VISIBLE_NODE_TYPES = ("Repository", "Module", "File", "Entity")
 VISIBLE_EDGE_TYPES = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES")
 WEB_STATIC_DIRECTORY_NAME = "web/static"
 
 
-def create_app(repository_path: Path | None = None) -> FastAPI:
+def create_app(repository_path: Path | None = None, *, llm_client: RigelLLM | None = None) -> FastAPI:
     """创建基于当前仓库 `.rigel` 目录的 Web 演示应用。"""
 
     resolved_repository_path = (repository_path or Path.cwd()).resolve()
@@ -38,6 +48,7 @@ def create_app(repository_path: Path | None = None) -> FastAPI:
     graph_name = _read_graph_name(state_path)
     # Web 入口复用 CLI 初始化状态，确保展示和 `rigel init` 写入的是同一个本地图谱。
     graph_reader = RigelGraphReader(database_path=database_path, graph_name=graph_name)
+    active_llm_client, llm_configuration_error = _resolve_llm_client(resolved_repository_path, llm_client)
 
     app = FastAPI(title="Rigel Demo", version="0.1.0")
 
@@ -55,6 +66,7 @@ def create_app(repository_path: Path | None = None) -> FastAPI:
             "workspace_path": str(workspace_path),
             "database_path": str(database_path),
             "graph_name": graph_name,
+            "llm": _llm_status(active_llm_client, llm_configuration_error),
         }
 
     @app.get("/api/summary")
@@ -84,6 +96,38 @@ def create_app(repository_path: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="limit 必须大于 0")
         return {"status": "success", "nodes": graph_reader.search(q.strip(), limit=limit)}
 
+    @app.post("/api/chat")
+    def chat(request: ChatRequest) -> dict[str, object]:
+        """调用已配置的 LLM 生成对话回复。"""
+
+        if active_llm_client is None:
+            raise HTTPException(status_code=503, detail=llm_configuration_error or "LLM 未配置")
+
+        messages = _to_llm_messages(request.messages)
+        if not messages:
+            raise HTTPException(status_code=400, detail="消息不能为空")
+        if messages[-1].role != "user":
+            raise HTTPException(status_code=400, detail="最后一条消息必须来自用户")
+
+        # 只增强最后一条用户问题，保留原始对话历史，避免把检索上下文重复塞进多轮消息。
+        enriched_messages = _attach_graph_context(
+            messages,
+            graph_reader=graph_reader,
+            database_path=database_path,
+        )
+        try:
+            reply = active_llm_client.generate_reply(enriched_messages)
+        except (LLMRequestError, LLMResponseError) as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+        return {
+            "status": "success",
+            "message": {"role": "assistant", "content": reply},
+            "model": active_llm_client.config.model,
+            "provider": active_llm_client.config.provider,
+            "format": active_llm_client.config.format.value,
+        }
+
     @app.get("/", response_model=None)
     def index() -> FileResponse | HTMLResponse:
         """返回已构建前端；未构建时提供最小占位入口。"""
@@ -94,6 +138,19 @@ def create_app(repository_path: Path | None = None) -> FastAPI:
         return HTMLResponse(_placeholder_html())
 
     return app
+
+
+class ChatMessagePayload(BaseModel):
+    """前端传入的聊天消息。"""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1)
+
+
+class ChatRequest(BaseModel):
+    """聊天请求体。"""
+
+    messages: list[ChatMessagePayload] = Field(min_length=1, max_length=50)
 
 
 class RigelGraphReader:
@@ -241,6 +298,87 @@ def _ensure_database_exists(database_path: Path) -> None:
             status_code=404,
             detail=f"未找到数据库文件，请先在目标仓库执行 rigel init: {database_path}",
         )
+
+
+def _resolve_llm_client(repository_path: Path, provided_client: RigelLLM | None) -> tuple[RigelLLM | None, str | None]:
+    if provided_client is not None:
+        # 测试和嵌入场景可以显式传入客户端，避免读取当前仓库的环境变量。
+        return provided_client, None
+
+    try:
+        return RigelLLM(LLMConfig.from_env(repository_path)), None
+    except LLMConfigurationError as error:
+        return None, str(error)
+
+
+def _llm_status(llm_client: RigelLLM | None, configuration_error: str | None) -> dict[str, object]:
+    if llm_client is None:
+        return {
+            "configured": False,
+            "error": configuration_error,
+        }
+
+    config = llm_client.config
+    return {
+        "configured": True,
+        "provider": config.provider,
+        "format": config.format.value,
+        "model": config.model,
+        "base_url": config.base_url,
+    }
+
+
+def _to_llm_messages(messages: list[ChatMessagePayload]) -> list[LLMMessage]:
+    return [
+        LLMMessage(role=message.role, content=message.content)
+        for message in messages
+        if message.content.strip()
+    ]
+
+
+def _attach_graph_context(
+    messages: list[LLMMessage],
+    *,
+    graph_reader: RigelGraphReader,
+    database_path: Path,
+) -> list[LLMMessage]:
+    if not database_path.exists():
+        # 未初始化仓库仍允许纯 LLM 对话，避免 Web 页面因为缺少图数据库完全不可用。
+        return messages
+
+    context = _build_graph_context(messages[-1].content, graph_reader=graph_reader)
+    if not context:
+        return messages
+
+    # 把检索结果写入用户问题前缀，让所有提供商都能通过普通文本获得同一份图谱上下文。
+    contextualized_latest_message = LLMMessage(
+        role="user",
+        content=f"代码图谱搜索上下文：\n{context}\n\n用户问题：\n{messages[-1].content}",
+    )
+    return [*messages[:-1], contextualized_latest_message]
+
+
+def _build_graph_context(query: str, *, graph_reader: RigelGraphReader) -> str:
+    nodes = graph_reader.search(query, limit=DEFAULT_CHAT_CONTEXT_LIMIT)
+    if not nodes:
+        return ""
+
+    lines: list[str] = []
+    for index, node in enumerate(nodes, start=1):
+        properties = node["properties"]
+        relative_path = _read_property(properties, "relative_path")
+        qualified_name = _read_property(properties, "qualified_name")
+        location = " / ".join(value for value in (qualified_name, relative_path) if value)
+        suffix = f"：{location}" if location else ""
+        lines.append(f"{index}. {node['label']}（{node['type']}）{suffix}")
+    return "\n".join(lines)
+
+
+def _read_property(properties: object, name: str) -> str:
+    if not isinstance(properties, Mapping):
+        return ""
+    value = properties.get(name)
+    return value if isinstance(value, str) else ""
 
 
 def _format_node(labels: list[str], node_id: str, properties: Mapping[str, object]) -> dict[str, object]:

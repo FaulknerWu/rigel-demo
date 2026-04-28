@@ -39,6 +39,19 @@ export interface ApiSearchResponse {
   nodes: ApiNode[];
 }
 
+export interface ApiChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ApiChatResponse {
+  status: string;
+  message: ApiChatMessage;
+  model: string;
+  provider: string;
+  format: string;
+}
+
 export interface GraphNode {
   id: string;
   name: string;
@@ -64,6 +77,8 @@ export interface GraphSummary {
   edgeCount: number;
   nodeTypes: Array<{ type: string; count: number }>;
 }
+
+export type ChatMessage = ApiChatMessage;
 
 const NODE_TYPE_COLORS = [
   '#f87171',
@@ -99,6 +114,18 @@ export async function searchNodes(query: string): Promise<GraphNode[]> {
   const response = await fetch(`/api/search?${params.toString()}`);
   const payload = await readJson<ApiSearchResponse>(response);
   return payload.nodes.map(adaptNode);
+}
+
+export async function sendChatMessage(messages: ChatMessage[]): Promise<ChatMessage> {
+  const response = await fetch('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ messages }),
+  });
+  const payload = await readJson<ApiChatResponse>(response);
+  return payload.message;
 }
 
 export function adaptGraph(graph: ApiGraph): GraphData {
