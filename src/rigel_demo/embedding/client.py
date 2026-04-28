@@ -19,7 +19,7 @@ class EmbeddingResponseError(RuntimeError):
 
 
 class RigelEmbedding:
-    """统一封装真实 Embedding 模型调用。"""
+    """统一封装 Embedding 模型调用。"""
 
     def __init__(
         self,

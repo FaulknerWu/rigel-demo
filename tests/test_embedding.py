@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase
 
-from rigel_demo.embedding import EmbeddingConfig, EmbeddingFormat, RigelEmbedding
+from rigel_demo.embedding import EmbeddingConfig, EmbeddingConfigurationError, EmbeddingFormat, RigelEmbedding
 
 
 class EmbeddingConfigTest(TestCase):
@@ -19,7 +19,9 @@ class EmbeddingConfigTest(TestCase):
                     "format": "openai_embeddings",
                     "model": "text-embedding-3-small",
                     "api_key": "embedding-key",
+                    "base_url": None,
                     "dimensions": 512,
+                    "timeout_seconds": 60,
                     "batch_size": 16,
                 },
             )
@@ -30,8 +32,28 @@ class EmbeddingConfigTest(TestCase):
         self.assertEqual(config.format, EmbeddingFormat.OPENAI_EMBEDDINGS)
         self.assertEqual(config.model, "text-embedding-3-small")
         self.assertEqual(config.api_key, "embedding-key")
+        self.assertIsNone(config.base_url)
         self.assertEqual(config.dimensions, 512)
+        self.assertEqual(config.timeout_seconds, 60)
         self.assertEqual(config.batch_size, 16)
+
+    def test_embedding_config_requires_template_fields(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = _write_embedding_config(
+                Path(workspace),
+                {
+                    "provider": "openai",
+                    "format": "openai_embeddings",
+                    "model": "text-embedding-3-small",
+                    "api_key": "embedding-key",
+                    "base_url": None,
+                    "dimensions": 512,
+                    "batch_size": 16,
+                },
+            )
+
+            with self.assertRaisesRegex(EmbeddingConfigurationError, "embedding.timeout_seconds"):
+                EmbeddingConfig.from_repository(repository_path)
 
 
 class RigelEmbeddingTest(TestCase):

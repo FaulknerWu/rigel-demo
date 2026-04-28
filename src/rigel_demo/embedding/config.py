@@ -14,9 +14,7 @@ RIGEL_CONFIG_DIRECTORY_NAME = ".rigel"
 RIGEL_CONFIG_FILE_NAME = "config.json"
 EMBEDDING_CONFIG_SECTION_NAME = "embedding"
 EMBEDDING_CONFIG_RELATIVE_PATH = Path(RIGEL_CONFIG_DIRECTORY_NAME) / RIGEL_CONFIG_FILE_NAME
-DEFAULT_OPENAI_EMBEDDINGS_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_EMBEDDING_TIMEOUT_SECONDS = 60.0
-DEFAULT_EMBEDDING_BATCH_SIZE = 64
+MAX_EMBEDDING_BATCH_SIZE = 2048
 
 
 class EmbeddingFormat(StrEnum):
@@ -47,14 +45,14 @@ class EmbeddingConfig:
         """从目标仓库 `.rigel/config.json` 读取 Embedding 配置。"""
 
         config_data = _read_embedding_config(repository_path)
-        provider = _read_string(config_data, "provider", default="openai").lower()
+        provider = _require_string(config_data, "provider").lower()
         embedding_format = _read_format(config_data)
         model = _require_string(config_data, "model")
         api_key = _require_string(config_data, "api_key")
         base_url = _read_base_url(config_data, provider)
-        dimensions = _read_optional_int(config_data, "dimensions")
-        timeout_seconds = _read_float(config_data, "timeout_seconds", DEFAULT_EMBEDDING_TIMEOUT_SECONDS)
-        batch_size = _read_int(config_data, "batch_size", DEFAULT_EMBEDDING_BATCH_SIZE)
+        dimensions = _read_nullable_positive_int(config_data, "dimensions")
+        timeout_seconds = _read_positive_float(config_data, "timeout_seconds")
+        batch_size = _read_batch_size(config_data)
 
         return cls(
             provider=provider,
@@ -90,7 +88,7 @@ def _read_embedding_config(repository_path: Path) -> dict[str, Any]:
 
 
 def _read_format(config_data: dict[str, Any]) -> EmbeddingFormat:
-    format_value = _read_string(config_data, "format", default=EmbeddingFormat.OPENAI_EMBEDDINGS.value).lower()
+    format_value = _require_string(config_data, "format").lower()
     try:
         return EmbeddingFormat(format_value)
     except ValueError as error:
@@ -99,7 +97,15 @@ def _read_format(config_data: dict[str, Any]) -> EmbeddingFormat:
 
 
 def _read_base_url(config_data: dict[str, Any], provider: str) -> str | None:
-    custom_base_url = _read_string(config_data, "base_url")
+    value = _require_field(config_data, "base_url")
+    if value is None:
+        if provider == "openai":
+            return None
+        raise EmbeddingConfigurationError("自定义 Embedding 提供商必须配置 embedding.base_url")
+    if not isinstance(value, str):
+        raise EmbeddingConfigurationError("embedding.base_url 必须是字符串或 null")
+
+    custom_base_url = value.strip()
     if custom_base_url:
         return custom_base_url
     if provider == "openai":
@@ -108,26 +114,23 @@ def _read_base_url(config_data: dict[str, Any], provider: str) -> str | None:
 
 
 def _require_string(config_data: dict[str, Any], name: str) -> str:
-    value = _read_string(config_data, name)
-    if value:
-        return value
-    raise EmbeddingConfigurationError(f"缺少必要配置：embedding.{name}")
-
-
-def _read_string(config_data: dict[str, Any], name: str, *, default: str | None = None) -> str | None:
-    value = config_data.get(name)
-    if value is None:
-        return default
+    value = _require_field(config_data, name)
     if not isinstance(value, str):
         raise EmbeddingConfigurationError(f"embedding.{name} 必须是字符串")
     stripped_value = value.strip()
-    return stripped_value or default
+    if stripped_value:
+        return stripped_value
+    raise EmbeddingConfigurationError(f"缺少必要配置：embedding.{name}")
 
 
-def _read_float(config_data: dict[str, Any], name: str, default: float) -> float:
-    value = config_data.get(name)
-    if value is None:
-        return default
+def _require_field(config_data: dict[str, Any], name: str) -> object:
+    if name not in config_data:
+        raise EmbeddingConfigurationError(f"缺少必要配置：embedding.{name}")
+    return config_data[name]
+
+
+def _read_positive_float(config_data: dict[str, Any], name: str) -> float:
+    value = _require_field(config_data, name)
     if not _is_number(value):
         raise EmbeddingConfigurationError(f"embedding.{name} 必须是数字")
     parsed_value = float(value)
@@ -136,21 +139,18 @@ def _read_float(config_data: dict[str, Any], name: str, default: float) -> float
     return parsed_value
 
 
-def _read_int(config_data: dict[str, Any], name: str, default: int) -> int:
-    value = config_data.get(name)
-    if value is None:
-        return default
-    parsed_value = _require_positive_int(value, name)
-    if parsed_value > 2048:
-        raise EmbeddingConfigurationError(f"embedding.{name} 不能大于 2048")
-    return parsed_value
-
-
-def _read_optional_int(config_data: dict[str, Any], name: str) -> int | None:
-    value = config_data.get(name)
+def _read_nullable_positive_int(config_data: dict[str, Any], name: str) -> int | None:
+    value = _require_field(config_data, name)
     if value is None:
         return None
     return _require_positive_int(value, name)
+
+
+def _read_batch_size(config_data: dict[str, Any]) -> int:
+    value = _require_positive_int(_require_field(config_data, "batch_size"), "batch_size")
+    if value > MAX_EMBEDDING_BATCH_SIZE:
+        raise EmbeddingConfigurationError(f"embedding.batch_size 不能大于 {MAX_EMBEDDING_BATCH_SIZE}")
+    return value
 
 
 def _require_positive_int(value: object, name: str) -> int:
