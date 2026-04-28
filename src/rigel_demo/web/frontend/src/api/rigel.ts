@@ -39,6 +39,28 @@ export interface ApiSearchResponse {
   nodes: ApiNode[];
 }
 
+export interface ApiRecallResult {
+  score: number;
+  summary: {
+    id: string;
+    text: string;
+    embedding_model: string;
+    embedding_dimensions: number;
+    source_hash: string;
+  };
+  node: ApiNode;
+  related: Array<{
+    direction: 'incoming' | 'outgoing';
+    edge: ApiEdge;
+    node: ApiNode;
+  }>;
+}
+
+export interface ApiRecallResponse {
+  status: string;
+  results: ApiRecallResult[];
+}
+
 export interface ApiChatMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -78,6 +100,17 @@ export interface GraphSummary {
   nodeTypes: Array<{ type: string; count: number }>;
 }
 
+export interface RecallResult {
+  score: number;
+  summary: string;
+  node: GraphNode;
+  related: Array<{
+    direction: 'incoming' | 'outgoing';
+    edgeType: string;
+    node: GraphNode;
+  }>;
+}
+
 export type ChatMessage = ApiChatMessage;
 
 const NODE_TYPE_COLORS = [
@@ -114,6 +147,13 @@ export async function searchNodes(query: string): Promise<GraphNode[]> {
   const response = await fetch(`/api/search?${params.toString()}`);
   const payload = await readJson<ApiSearchResponse>(response);
   return payload.nodes.map(adaptNode);
+}
+
+export async function recallNodes(query: string): Promise<RecallResult[]> {
+  const params = new URLSearchParams({ q: query, limit: String(SEARCH_LIMIT) });
+  const response = await fetch(`/api/recall?${params.toString()}`);
+  const payload = await readJson<ApiRecallResponse>(response);
+  return payload.results.map(adaptRecallResult);
 }
 
 export async function sendChatMessage(messages: ChatMessage[]): Promise<ChatMessage> {
@@ -155,6 +195,19 @@ export function adaptNode(node: ApiNode): GraphNode {
     group: node.type || 'Unknown',
     color: colorForNodeType(node.type || 'Unknown'),
     summary: formatNodeSummary(node),
+  };
+}
+
+export function adaptRecallResult(result: ApiRecallResult): RecallResult {
+  return {
+    score: result.score,
+    summary: result.summary.text,
+    node: adaptNode(result.node),
+    related: result.related.map((related) => ({
+      direction: related.direction,
+      edgeType: related.edge.type,
+      node: adaptNode(related.node),
+    })),
   };
 }
 

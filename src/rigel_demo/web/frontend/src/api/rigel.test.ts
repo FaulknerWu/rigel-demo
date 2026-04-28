@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { adaptGraph, adaptNode, adaptSummary, type ApiGraph, type ApiNode, type ApiSummary } from './rigel';
+import { adaptGraph, adaptNode, adaptRecallResult, adaptSummary, type ApiGraph, type ApiNode, type ApiRecallResult, type ApiSummary } from './rigel';
 
 const apiNode: ApiNode = {
   id: 'node-1',
@@ -55,3 +55,34 @@ assert.deepEqual(graphSummary, {
   edgeCount: 2,
   nodeTypes: [{ type: 'Class', count: 1 }],
 });
+
+const recallResult: ApiRecallResult = {
+  score: 0.75,
+  summary: {
+    id: 'summary-1',
+    text: 'Class RepositoryIndexer',
+    embedding_model: 'text-embedding-3-small',
+    embedding_dimensions: 3,
+    source_hash: 'sha256:test',
+  },
+  node: apiNode,
+  related: [
+    {
+      direction: 'outgoing',
+      edge: apiGraph.edges[0],
+      node: {
+        ...apiNode,
+        id: 'node-2',
+        label: 'GraphIR',
+      },
+    },
+  ],
+};
+
+const adaptedRecallResult = adaptRecallResult(recallResult);
+assert.equal(adaptedRecallResult.score, 0.75);
+assert.equal(adaptedRecallResult.summary, 'Class RepositoryIndexer');
+assert.equal(adaptedRecallResult.node.name, 'RepositoryIndexer');
+assert.deepEqual(adaptedRecallResult.related.map((related) => [related.direction, related.edgeType, related.node.name]), [
+  ['outgoing', 'CALLS', 'GraphIR'],
+]);

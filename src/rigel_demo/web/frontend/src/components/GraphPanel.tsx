@@ -189,7 +189,7 @@ export default function GraphPanel() {
             ) : (
               <>
                 <div className="text-sm font-medium text-white">暂无图谱数据</div>
-                <div className="mt-2 text-xs leading-relaxed text-slate-500">当前数据库没有可展示的节点，请重新执行 rigel init。</div>
+                <div className="mt-2 text-xs leading-relaxed text-slate-500">当前数据库没有可展示的节点，请重新执行 rigel index。</div>
               </>
             )}
           </div>
