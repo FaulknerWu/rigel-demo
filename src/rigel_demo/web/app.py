@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
@@ -15,6 +15,7 @@ from rigel_demo.cli import (
     DEFAULT_GRAPH_NAME,
     FALKORDB_DATABASE_FILE_NAME,
     RIGEL_WORKSPACE_DIRECTORY_NAME,
+    WEB_STATIC_DIRECTORY_NAME,
     WORKSPACE_STATE_FILE_NAME,
 )
 from rigel_demo.llm import (
@@ -32,7 +33,6 @@ DEFAULT_SEARCH_LIMIT = 50
 DEFAULT_CHAT_CONTEXT_LIMIT = 8
 VISIBLE_NODE_TYPES = ("Repository", "Module", "File", "Entity")
 VISIBLE_EDGE_TYPES = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES")
-WEB_STATIC_DIRECTORY_NAME = "web/static"
 
 
 def create_app(repository_path: Path | None = None, *, llm_client: RigelLLM | None = None) -> FastAPI:
@@ -197,7 +197,7 @@ class RigelGraphReader:
             "node_count": node_count,
             "edge_count": edge_count,
             "node_types": [
-                {"type": node_type or "Unknown", "count": count}
+                {"type": node_type, "count": count}
                 for node_type, count in type_rows
             ],
         }
@@ -209,12 +209,12 @@ class RigelGraphReader:
             """
             MATCH (node:RigelNode)
             WHERE node.rigel_type IN $visible_node_types
-            RETURN labels(node), node.id, properties(node)
+            RETURN node.id, properties(node)
             LIMIT $limit
             """,
             {"visible_node_types": list(VISIBLE_NODE_TYPES), "limit": limit},
         )
-        nodes = [_format_node(labels, node_id, properties) for labels, node_id, properties in node_rows]
+        nodes = [_format_node(node_id, properties) for node_id, properties in node_rows]
         node_ids = [str(node["id"]) for node in nodes]
         if not node_ids:
             return {"nodes": [], "edges": []}
@@ -252,24 +252,24 @@ class RigelGraphReader:
                 OR toLower(coalesce(node.name, '')) CONTAINS $query
                 OR toLower(coalesce(node.id, '')) CONTAINS $query
               )
-            RETURN labels(node), node.id, properties(node)
+            RETURN node.id, properties(node)
             LIMIT $limit
             """,
             {"visible_node_types": list(VISIBLE_NODE_TYPES), "query": normalized_query, "limit": limit},
         )
-        return [_format_node(labels, node_id, properties) for labels, node_id, properties in rows]
+        return [_format_node(node_id, properties) for node_id, properties in rows]
 
-    def _scalar_query(self, query: str, parameters: Mapping[str, object] | None = None) -> int:
+    def _scalar_query(self, query: str, parameters: Mapping[str, object]) -> int:
         rows = self._query(query, parameters)
         if not rows:
             return 0
         return int(rows[0][0])
 
-    def _query(self, query: str, parameters: Mapping[str, object] | None = None) -> list[list[Any]]:
+    def _query(self, query: str, parameters: Mapping[str, object]) -> list[list[Any]]:
         store = FalkorDBStore.connect(
             FalkorDBConfig(graph_name=self._graph_name, database_path=str(self._database_path))
         )
-        result = store.graph.query(query, dict(parameters or {}))
+        result = store.graph.query(query, dict(parameters))
         return list(result.result_set)
 
 
@@ -281,13 +281,7 @@ def _read_graph_name(state_path: Path) -> str:
 
     import json
 
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return DEFAULT_GRAPH_NAME
-
-    graph_name = state.get("graph_name")
-    return graph_name if isinstance(graph_name, str) and graph_name else DEFAULT_GRAPH_NAME
+    return cast(str, json.loads(state_path.read_text(encoding="utf-8"))["graph_name"])
 
 
 def _ensure_database_exists(database_path: Path) -> None:
@@ -365,7 +359,7 @@ def _build_graph_context(query: str, *, graph_reader: RigelGraphReader) -> str:
 
     lines: list[str] = []
     for index, node in enumerate(nodes, start=1):
-        properties = node["properties"]
+        properties = cast(Mapping[str, object], node["properties"])
         relative_path = _read_property(properties, "relative_path")
         qualified_name = _read_property(properties, "qualified_name")
         location = " / ".join(value for value in (qualified_name, relative_path) if value)
@@ -374,20 +368,16 @@ def _build_graph_context(query: str, *, graph_reader: RigelGraphReader) -> str:
     return "\n".join(lines)
 
 
-def _read_property(properties: object, name: str) -> str:
-    if not isinstance(properties, Mapping):
-        return ""
+def _read_property(properties: Mapping[str, object], name: str) -> str:
     value = properties.get(name)
     return value if isinstance(value, str) else ""
 
 
-def _format_node(labels: list[str], node_id: str, properties: Mapping[str, object]) -> dict[str, object]:
+def _format_node(node_id: str, properties: Mapping[str, object]) -> dict[str, object]:
     formatted_properties = dict(properties)
-    # rigel_type 是写入时的稳定类型；标签只作为兼容旧数据或调试数据的兜底来源。
-    node_type = str(formatted_properties.get("rigel_type") or _first_domain_label(labels))
     return {
         "id": node_id,
-        "type": node_type,
+        "type": str(formatted_properties["rigel_type"]),
         "label": _node_label(node_id, formatted_properties),
         "properties": formatted_properties,
     }
@@ -401,19 +391,12 @@ def _format_edge(
 ) -> dict[str, object]:
     formatted_properties = dict(properties)
     return {
-        "id": str(formatted_properties.get("id") or f"{edge_type}:{source_id}:{target_id}"),
+        "id": str(formatted_properties["id"]),
         "source": source_id,
         "target": target_id,
         "type": edge_type,
         "properties": formatted_properties,
     }
-
-
-def _first_domain_label(labels: list[str]) -> str:
-    for label in labels:
-        if label != "RigelNode":
-            return label
-    return "Unknown"
 
 
 def _node_label(node_id: str, properties: Mapping[str, object]) -> str:

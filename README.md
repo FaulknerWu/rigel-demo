@@ -66,7 +66,8 @@ GEMINI_API_KEY=your-gemini-key
 ```python
 from pathlib import Path
 
-from rigel_demo import FalkorDBConfig, FalkorDBStore, JavaParseRequest, parse_java_file
+from rigel_demo.java import JavaParseRequest, parse_java_file
+from rigel_demo.storage import FalkorDBConfig, FalkorDBStore
 
 source_path = Path("src/main/java/demo/Service.java")
 graph = parse_java_file(

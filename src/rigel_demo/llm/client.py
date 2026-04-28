@@ -103,9 +103,9 @@ class RigelLLM:
         _apply_optional_generation_options(request_body, self._config, max_tokens_key="max_output_tokens")
 
         response = self._client.responses.create(**request_body)
-        output_text = _extract_responses_output_text(response)
-        if output_text:
-            return output_text
+        output_text = getattr(response, "output_text", None)
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
         raise LLMResponseError("LLM 未返回可展示文本")
 
     def _generate_with_chat(self, messages: Sequence[LLMMessage]) -> str:
@@ -210,12 +210,18 @@ def _extract_google_output_text(response_body: dict[str, Any]) -> str:
         return ""
 
     for candidate in candidates:
-        content = _read_field(candidate, "content")
-        parts = _read_field(content, "parts")
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        if not isinstance(content, dict):
+            continue
+        parts = content.get("parts")
         if not isinstance(parts, list):
             continue
         for part in parts:
-            text = _read_field(part, "text")
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
             if isinstance(text, str) and text.strip():
                 text_parts.append(text.strip())
     return "\n".join(text_parts).strip()
@@ -231,31 +237,3 @@ def _require_http_client(http_client: httpx.Client | None) -> httpx.Client:
     if http_client is None:
         raise LLMConfigurationError("Google 请求客户端未初始化")
     return http_client
-
-
-def _extract_responses_output_text(response: Any) -> str:
-    output_text = getattr(response, "output_text", None)
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip()
-
-    # 兼容测试替身或旧响应对象：没有 output_text 时从结构化 output 中拼接文本片段。
-    output_items = getattr(response, "output", None)
-    if not isinstance(output_items, list):
-        return ""
-
-    text_parts: list[str] = []
-    for output_item in output_items:
-        content_items = _read_field(output_item, "content")
-        if not isinstance(content_items, list):
-            continue
-        for content_item in content_items:
-            text = _read_field(content_item, "text")
-            if isinstance(text, str) and text.strip():
-                text_parts.append(text.strip())
-    return "\n".join(text_parts).strip()
-
-
-def _read_field(value: Any, name: str) -> Any:
-    if isinstance(value, dict):
-        return value.get(name)
-    return getattr(value, name, None)
