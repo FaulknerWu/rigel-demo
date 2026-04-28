@@ -10,7 +10,7 @@ import webbrowser
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 
 RIGEL_WORKSPACE_DIRECTORY_NAME = ".rigel"
@@ -19,10 +19,15 @@ FALKORDB_DATABASE_FILE_NAME = "falkordb.db"
 WORKSPACE_STATE_FILE_NAME = "rigel.json"
 WEB_STATIC_DIRECTORY_NAME = "web/static"
 DEFAULT_GRAPH_NAME = "rigel"
+WEB_CONFIG_SECTION_NAME = "web"
 DEFAULT_CONFIG_DOCUMENT = {
+    "web": {
+        "host": "127.0.0.1",
+        "port": 5000,
+        "open_browser": True,
+    },
     "chat": {
         "provider": "openai",
-        "format": "openai_responses",
         "model": "gpt-5.2",
         "api_key": "sk-your-openai-key",
         "base_url": None,
@@ -33,7 +38,6 @@ DEFAULT_CONFIG_DOCUMENT = {
     },
     "summary": {
         "provider": "openai",
-        "format": "openai_responses",
         "model": "gpt-5.2",
         "api_key": "sk-your-openai-key",
         "base_url": None,
@@ -77,6 +81,30 @@ class IndexResult:
     indexed_file_count: int
     graph_node_count: int
     graph_edge_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class WebConfig:
+    """Web 演示后端运行配置。"""
+
+    host: str
+    port: int
+    open_browser: bool
+
+    @classmethod
+    def from_repository(cls, repository_path: Path) -> "WebConfig":
+        """从目标仓库 `.rigel/config.json` 读取 Web 启动配置。"""
+
+        config_data = _read_web_config(repository_path)
+        return cls(
+            host=_require_web_string(config_data, "host"),
+            port=_require_web_port(config_data.get("port")),
+            open_browser=_require_web_bool(config_data.get("open_browser"), "open_browser"),
+        )
+
+
+class WebConfigurationError(ValueError):
+    """Web 配置不可用。"""
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -170,11 +198,8 @@ def _build_parser() -> argparse.ArgumentParser:
     web_parser = subparsers.add_parser(
         "web",
         help="启动当前仓库的 Rigel Web 演示后端。",
-        description="读取当前目录 .rigel/falkordb.db，启动 Web 演示后端并打开浏览器。",
+        description="读取当前目录 .rigel/config.json 与 .rigel/falkordb.db，启动 Web 演示后端。",
     )
-    web_parser.add_argument("--host", default="127.0.0.1", help="Web 服务监听地址。")
-    web_parser.add_argument("--port", default=5000, type=int, help="Web 服务监听端口。")
-    web_parser.add_argument("--no-open", action="store_true", help="只启动服务，不自动打开浏览器。")
     web_parser.set_defaults(command_handler=_handle_web_command)
 
     return parser
@@ -212,7 +237,7 @@ def _handle_index_command(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_web_command(args: argparse.Namespace) -> int:
+def _handle_web_command(_args: argparse.Namespace) -> int:
     """处理 web 命令。"""
 
     import uvicorn
@@ -222,6 +247,12 @@ def _handle_web_command(args: argparse.Namespace) -> int:
     repository_path = Path.cwd().resolve()
     workspace_path = repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
     database_path = repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME / FALKORDB_DATABASE_FILE_NAME
+    try:
+        web_config = WebConfig.from_repository(repository_path)
+    except (FileNotFoundError, WebConfigurationError) as error:
+        print(str(error))
+        return 1
+
     if not database_artifact_exists(database_path):
         print(f"未找到图数据库: {database_path}")
         print("请先在目标仓库执行 rigel index。")
@@ -232,16 +263,16 @@ def _handle_web_command(args: argparse.Namespace) -> int:
         print(frontend_result.message)
         return 1
 
-    url = f"http://{args.host}:{args.port}"
+    url = f"http://{web_config.host}:{web_config.port}"
     print("Rigel Web 演示后端已启动", flush=True)
     print(f"仓库目录: {repository_path}", flush=True)
     print(f"图数据库: {database_path}", flush=True)
     print(f"前端目录: {frontend_result.static_path}", flush=True)
     print(f"访问地址: {url}", flush=True)
-    if not args.no_open:
+    if web_config.open_browser:
         webbrowser.open(url)
 
-    uvicorn.run(create_app(repository_path), host=args.host, port=args.port)
+    uvicorn.run(create_app(repository_path), host=web_config.host, port=web_config.port)
     return 0
 
 
@@ -271,7 +302,7 @@ def build_frontend(static_path: Path) -> FrontendBuildResult:
         return FrontendBuildResult(
             success=False,
             static_path=static_path,
-            message="未找到 npm，无法构建 Rigel Web 前端。",
+            message="未找到 npm，请先安装 Node.js/npm，并确认 npm --version 可用后再构建 Rigel Web 前端。",
         )
 
     node_modules_path = frontend_path / "node_modules"
@@ -351,6 +382,50 @@ def _remove_database_artifacts(database_path: Path) -> None:
 
     database_path.unlink(missing_ok=True)
     database_path.with_name(f"{database_path.name}.settings").unlink(missing_ok=True)
+
+
+def _read_web_config(repository_path: Path) -> dict[str, Any]:
+    """读取 `.rigel/config.json` 中的 Web 配置段。"""
+
+    config_path = repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME / RIGEL_CONFIG_FILE_NAME
+    if not config_path.exists():
+        raise FileNotFoundError(f"未找到配置文件，请先执行 rigel init 并填写配置：{config_path}")
+
+    try:
+        config_document = json.loads(config_path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise WebConfigurationError(f"读取 Web 配置文件失败：{config_path}") from error
+    except json.JSONDecodeError as error:
+        raise WebConfigurationError(f"Web 配置文件不是合法 JSON：{config_path}") from error
+
+    if not isinstance(config_document, dict):
+        raise WebConfigurationError("Web 配置文件根节点必须是 JSON 对象")
+
+    web_config = config_document.get(WEB_CONFIG_SECTION_NAME)
+    if not isinstance(web_config, dict):
+        raise WebConfigurationError(f"配置文件必须包含对象字段：{WEB_CONFIG_SECTION_NAME}")
+    return web_config
+
+
+def _require_web_string(config_data: dict[str, Any], name: str) -> str:
+    value = config_data.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise WebConfigurationError(f"web.{name} 必须是非空字符串")
+    return value.strip()
+
+
+def _require_web_port(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise WebConfigurationError("web.port 必须是整数")
+    if value < 1 or value > 65_535:
+        raise WebConfigurationError("web.port 必须在 1 到 65535 之间")
+    return value
+
+
+def _require_web_bool(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise WebConfigurationError(f"web.{name} 必须是布尔值")
+    return value
 
 
 if __name__ == "__main__":
