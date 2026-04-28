@@ -26,6 +26,25 @@ uv run rigel index
 `multilspy` 启动真实 Java LSP 补全跨文件定义跳转、引用与调用关系，并重建
 `.rigel/falkordb.db`。运行前需确保本机 `java` 命令可用。
 
+启动 Web 演示后端：
+
+```bash
+uv run rigel web
+```
+
+`rigel web` 的监听地址、端口和是否自动打开浏览器都从 `.rigel/config.json`
+的 `web` 字段读取，不再通过命令行参数传入：
+
+```json
+{
+  "web": {
+    "host": "127.0.0.1",
+    "port": 5000,
+    "open_browser": true
+  }
+}
+```
+
 ## 功能级模型配置
 
 模型配置写在目标仓库 `.rigel/config.json` 中，`rigel init` 会生成默认模板。
@@ -35,55 +54,28 @@ uv run rigel index
 - `summary`: `rigel index` 生成 `Summary.text` 使用的生成模型。
 - `embedding`: `rigel index` 写入 Summary 向量、Web 召回查询向量使用的嵌入模型。
 
-`chat` 与 `summary` 都复用同一套 LLM 客户端字段。`provider` 是提供商名称，
-`format` 决定请求协议格式，当前支持 `openai_chat`、`google_generate_content`
-与 `openai_responses`。两个功能可以配置不同的模型、密钥、Base URL 与生成参数。
-
-OpenAI Responses API：
+`chat` 与 `summary` 都复用同一套 LLM 客户端字段，当前只调用
+OpenAI-compatible Chat Completions API。`provider` 是提供商名称，两个功能可以配置
+不同的模型、密钥、Base URL 与生成参数。
 
 ```json
 {
   "chat": {
     "provider": "openai",
-    "format": "openai_responses",
     "model": "gpt-5.2",
-    "api_key": "sk-your-openai-key"
-  }
-}
-```
-
-OpenAI Chat Completions API：
-
-```json
-{
-  "summary": {
-    "provider": "openai",
-    "format": "openai_chat",
-    "model": "gpt-5.2-mini",
     "api_key": "sk-your-openai-key",
-    "base_url": "https://api.openai.com/v1",
+    "base_url": null,
     "temperature": 0,
-    "max_output_tokens": 300
+    "max_output_tokens": null,
+    "system_prompt": null
   }
 }
 ```
 
-Google Gemini 原生 generateContent：
-
-```json
-{
-  "chat": {
-    "provider": "google",
-    "format": "google_generate_content",
-    "model": "gemini-3-flash-preview",
-    "api_key": "your-gemini-key"
-  }
-}
-```
-
-新增提供商时设置新的 `chat.provider` 或 `summary.provider` 名称，选择其兼容的
-`format`，并通过对应功能段的 `api_key` 与 `base_url` 配置访问参数。可选生成参数包括
-`timeout_seconds`、`temperature`、`max_output_tokens` 与 `system_prompt`。
+新增 OpenAI-compatible 提供商时设置新的 `chat.provider` 或 `summary.provider` 名称，
+并通过对应功能段的 `api_key` 与 `base_url` 配置访问参数。可选生成参数包括
+`timeout_seconds`、`temperature`、`max_output_tokens` 与 `system_prompt`，其中
+`max_output_tokens` 会映射到 Chat Completions 的 `max_completion_tokens`。
 
 ## Embedding 配置
 
