@@ -48,6 +48,8 @@ DEFAULT_RECALL_LIMIT = 8
 DEFAULT_RECALL_SCAN_LIMIT = 2_000
 DEFAULT_RECALL_EXPANSION_LIMIT = 3
 DEFAULT_CHAT_CONTEXT_LIMIT = 8
+DEFAULT_SOURCE_SLICE_MAX_LINES = 120
+DEFAULT_CONTEXT_SOURCE_SLICE_LIMIT = 1
 VISIBLE_NODE_TYPES = ("Repository", "Module", "File", "Entity")
 VISIBLE_EDGE_TYPES = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES")
 
@@ -70,6 +72,7 @@ def create_app(
     graph_name = _read_graph_name(state_path)
     # Web 入口复用 CLI 索引状态，确保展示和 `rigel index` 写入的是同一个本地图谱。
     graph_reader = RigelGraphReader(database_path=database_path, graph_name=graph_name)
+    source_reader = RepositorySourceReader(resolved_repository_path)
     active_chat_client, chat_configuration_error = _resolve_chat_client(resolved_repository_path, chat_client)
     active_embedding_client, embedding_configuration_error = _resolve_embedding_client(resolved_repository_path, embedding_client)
 
@@ -120,6 +123,51 @@ def create_app(
             raise HTTPException(status_code=400, detail="limit 必须大于 0")
         return {"status": "success", "nodes": graph_reader.search(q.strip(), limit=limit)}
 
+    @app.get("/api/nodes/{node_id:path}/anchors")
+    def node_anchors(node_id: str) -> dict[str, object]:
+        """返回指定图谱节点的源码锚点。"""
+
+        _ensure_database_exists(database_path)
+        result = graph_reader.anchors_for_node(node_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"未找到节点：{node_id}")
+        return {"status": "success", **result}
+
+    @app.get("/api/source")
+    def source(path: str, start_line: int, end_line: int) -> dict[str, object]:
+        """读取已索引源码文件的安全行号切片。"""
+
+        _ensure_database_exists(database_path)
+        try:
+            normalized_path = source_reader.normalize_relative_path(path)
+        except SourcePathError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+        source_file = graph_reader.source_file(normalized_path)
+        if source_file is None:
+            raise HTTPException(status_code=404, detail=f"未找到已索引源码文件：{normalized_path}")
+
+        try:
+            source_slice = source_reader.read_slice(
+                normalized_path,
+                start_line=start_line,
+                end_line=end_line,
+            )
+        except SourceLineRangeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except SourceFileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except SourceReadError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+        return {
+            "status": "success",
+            "source": {
+                **source_slice,
+                "source_file": source_file,
+            },
+        }
+
     @app.get("/api/recall")
     def recall(q: str, limit: int = DEFAULT_RECALL_LIMIT) -> dict[str, object]:
         """基于 Summary 向量召回代码图谱种子节点。"""
@@ -142,6 +190,33 @@ def create_app(
                 embedding_model=active_embedding_client.config.model,
                 limit=limit,
                 expansion_limit=DEFAULT_RECALL_EXPANSION_LIMIT,
+            ),
+        }
+
+    @app.get("/api/context")
+    def context(q: str, limit: int = DEFAULT_RECALL_LIMIT) -> dict[str, object]:
+        """返回 Agent 可消费的结构化代码图谱上下文。"""
+
+        _ensure_database_exists(database_path)
+        if active_embedding_client is None:
+            raise HTTPException(status_code=503, detail=embedding_configuration_error or "Embedding 未配置")
+        if not q.strip():
+            raise HTTPException(status_code=400, detail="q 不能为空")
+        if limit < 1:
+            raise HTTPException(status_code=400, detail="limit 必须大于 0")
+        try:
+            query_embedding = active_embedding_client.embed_query(q.strip())
+        except (EmbeddingRequestError, EmbeddingResponseError) as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        return {
+            "status": "success",
+            "context": graph_reader.context(
+                query=q.strip(),
+                query_embedding=query_embedding,
+                embedding_model=active_embedding_client.config.model,
+                limit=limit,
+                expansion_limit=DEFAULT_RECALL_EXPANSION_LIMIT,
+                source_reader=source_reader,
             ),
         }
 
@@ -204,6 +279,92 @@ class ChatRequest(BaseModel):
     """聊天请求体。"""
 
     messages: list[ChatMessagePayload] = Field(min_length=1, max_length=50)
+
+
+class SourcePathError(ValueError):
+    """源码路径不在当前仓库内。"""
+
+
+class SourceLineRangeError(ValueError):
+    """源码切片行号范围不可用。"""
+
+
+class SourceFileNotFoundError(FileNotFoundError):
+    """源码文件不存在。"""
+
+
+class SourceReadError(RuntimeError):
+    """源码文件读取失败。"""
+
+
+class RepositorySourceReader:
+    """从当前仓库安全读取源码切片。"""
+
+    def __init__(self, repository_path: Path) -> None:
+        self._repository_path = repository_path.resolve()
+
+    def normalize_relative_path(self, relative_path: str) -> str:
+        candidate_path = self._resolve_repository_file(relative_path)
+        try:
+            return candidate_path.relative_to(self._repository_path).as_posix()
+        except ValueError as error:
+            raise SourcePathError("源码路径必须位于当前仓库内") from error
+
+    def read_slice(
+        self,
+        relative_path: str,
+        *,
+        start_line: int,
+        end_line: int,
+        max_lines: int = DEFAULT_SOURCE_SLICE_MAX_LINES,
+    ) -> dict[str, object]:
+        normalized_path = self.normalize_relative_path(relative_path)
+        if start_line < 1:
+            raise SourceLineRangeError("start_line 必须大于 0")
+        if end_line < start_line:
+            raise SourceLineRangeError("end_line 必须大于或等于 start_line")
+
+        bounded_end_line = min(end_line, start_line + max_lines - 1)
+        file_path = self._repository_path / normalized_path
+        if not file_path.exists() or not file_path.is_file():
+            raise SourceFileNotFoundError(f"未找到源码文件：{normalized_path}")
+
+        try:
+            lines = file_path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError as error:
+            raise SourceReadError(f"源码文件不是 UTF-8 文本：{normalized_path}") from error
+        except OSError as error:
+            raise SourceReadError(f"读取源码文件失败：{normalized_path}") from error
+
+        total_lines = len(lines)
+        if start_line > total_lines:
+            raise SourceLineRangeError(f"start_line 超出文件总行数：{total_lines}")
+
+        actual_end_line = min(bounded_end_line, total_lines)
+        selected_lines = lines[start_line - 1 : actual_end_line]
+        return {
+            "relative_path": normalized_path,
+            "start_line": start_line,
+            "end_line": actual_end_line,
+            "requested_end_line": end_line,
+            "truncated": actual_end_line < end_line,
+            "total_lines": total_lines,
+            "content": "\n".join(selected_lines),
+        }
+
+    def _resolve_repository_file(self, relative_path: str) -> Path:
+        if not relative_path.strip():
+            raise SourcePathError("源码路径不能为空")
+        raw_path = Path(relative_path)
+        if raw_path.is_absolute():
+            candidate_path = raw_path.resolve()
+        else:
+            candidate_path = (self._repository_path / raw_path).resolve()
+        try:
+            candidate_path.relative_to(self._repository_path)
+        except ValueError as error:
+            raise SourcePathError("源码路径必须位于当前仓库内") from error
+        return candidate_path
 
 
 class RigelGraphReader:
@@ -364,6 +525,71 @@ class RigelGraphReader:
         )
         return scored_results[:limit]
 
+    def context(
+        self,
+        *,
+        query: str,
+        query_embedding: list[float],
+        embedding_model: str,
+        limit: int,
+        expansion_limit: int,
+        source_reader: RepositorySourceReader | None = None,
+    ) -> dict[str, object]:
+        """组装 Agent 可直接引用的结构化图谱上下文。"""
+
+        recall_results = self.recall(
+            query_embedding,
+            embedding_model=embedding_model,
+            limit=limit,
+            expansion_limit=expansion_limit,
+        )
+        if recall_results:
+            return {
+                "query": query,
+                "strategy": "vector_recall",
+                "seeds": [
+                    self._context_seed_from_recall_result(index, result, source_reader=source_reader)
+                    for index, result in enumerate(recall_results, start=1)
+                ],
+            }
+
+        fallback_nodes = self.search(query, limit=limit)
+        return {
+            "query": query,
+            "strategy": "keyword_fallback" if fallback_nodes else "empty",
+            "seeds": [
+                self._context_seed_from_node(index, node, source_reader=source_reader)
+                for index, node in enumerate(fallback_nodes, start=1)
+            ],
+        }
+
+    def anchors_for_node(self, node_id: str) -> dict[str, object] | None:
+        """返回节点和它的源码锚点；节点不存在时返回 None。"""
+
+        node = self._node_by_id(node_id)
+        if node is None:
+            return None
+        source_file = self._source_file_for_node(node_id)
+        return {
+            "node": node,
+            "source_file": source_file,
+            "anchors": self._anchors_for_node(node_id, source_file=source_file),
+        }
+
+    def source_file(self, relative_path: str) -> dict[str, object] | None:
+        rows = self._query(
+            """
+            MATCH (node:RigelNode:File)
+            WHERE node.relative_path = $relative_path
+            RETURN node.id, properties(node)
+            LIMIT 1
+            """,
+            {"relative_path": relative_path},
+        )
+        if not rows:
+            return None
+        return _format_source_file(_format_node(rows[0][0], rows[0][1]))
+
     def _related_nodes(self, node_id: str, *, limit: int) -> list[dict[str, object]]:
         rows = self._query(
             """
@@ -396,6 +622,111 @@ class RigelGraphReader:
                 }
             )
         return related_nodes
+
+    def _context_seed_from_recall_result(
+        self,
+        rank: int,
+        result: dict[str, object],
+        *,
+        source_reader: RepositorySourceReader | None,
+    ) -> dict[str, object]:
+        node = cast(dict[str, object], result["node"])
+        node_id = str(node["id"])
+        source_file = self._source_file_for_node(node_id)
+        anchors = self._anchors_for_node(node_id, source_file=source_file)
+        return {
+            "rank": rank,
+            "score": result["score"],
+            "summary": result["summary"],
+            "node": node,
+            "related": result["related"],
+            "source_file": source_file,
+            "anchors": anchors,
+            "source_slices": _source_slices_for_anchors(anchors, source_reader=source_reader),
+        }
+
+    def _context_seed_from_node(
+        self,
+        rank: int,
+        node: dict[str, object],
+        *,
+        source_reader: RepositorySourceReader | None,
+    ) -> dict[str, object]:
+        node_id = str(node["id"])
+        source_file = self._source_file_for_node(node_id)
+        anchors = self._anchors_for_node(node_id, source_file=source_file)
+        return {
+            "rank": rank,
+            "score": None,
+            "summary": None,
+            "node": node,
+            "related": self._related_nodes(node_id, limit=DEFAULT_RECALL_EXPANSION_LIMIT),
+            "source_file": source_file,
+            "anchors": anchors,
+            "source_slices": _source_slices_for_anchors(anchors, source_reader=source_reader),
+        }
+
+    def _anchors_for_node(
+        self,
+        node_id: str,
+        *,
+        source_file: dict[str, object] | None,
+    ) -> list[dict[str, object]]:
+        rows = self._query(
+            """
+            MATCH (owner:RigelNode)-[edge:HAS_ANCHOR]->(anchor:RigelNode:Anchor)
+            WHERE owner.id = $node_id
+            RETURN anchor.id, properties(anchor), properties(edge)
+            """,
+            {"node_id": node_id},
+        )
+        anchors = [
+            _format_anchor(anchor_id, anchor_properties, edge_properties, source_file)
+            for anchor_id, anchor_properties, edge_properties in rows
+        ]
+        anchors.sort(key=_anchor_sort_key)
+        return anchors
+
+    def _source_file_for_node(self, node_id: str) -> dict[str, object] | None:
+        current_node_id: str | None = node_id
+        visited_node_ids: set[str] = set()
+        while current_node_id and current_node_id not in visited_node_ids:
+            visited_node_ids.add(current_node_id)
+            node = self._node_by_id(current_node_id)
+            if node is None:
+                return None
+            if node["type"] == "File":
+                return _format_source_file(node)
+            current_node_id = self._parent_node_id(current_node_id)
+        return None
+
+    def _node_by_id(self, node_id: str) -> dict[str, object] | None:
+        rows = self._query(
+            """
+            MATCH (node:RigelNode)
+            WHERE node.id = $node_id
+            RETURN node.id, properties(node)
+            LIMIT 1
+            """,
+            {"node_id": node_id},
+        )
+        if not rows:
+            return None
+        return _format_node(rows[0][0], rows[0][1])
+
+    def _parent_node_id(self, node_id: str) -> str | None:
+        rows = self._query(
+            """
+            MATCH (parent:RigelNode)-[:CONTAINS]->(child:RigelNode)
+            WHERE child.id = $node_id
+            RETURN parent.id
+            LIMIT 1
+            """,
+            {"node_id": node_id},
+        )
+        if not rows:
+            return None
+        return str(rows[0][0])
 
     def _scalar_query(self, query: str, parameters: Mapping[str, object]) -> int:
         rows = self._query(query, parameters)
@@ -614,6 +945,94 @@ def _format_summary(summary_id: str, properties: Mapping[str, object]) -> dict[s
         "embedding_dimensions": _read_int_property(properties, "embedding_dimensions"),
         "source_hash": _read_property(properties, "source_hash"),
     }
+
+
+def _format_anchor(
+    anchor_id: str,
+    anchor_properties: Mapping[str, object],
+    edge_properties: Mapping[str, object],
+    source_file: dict[str, object] | None,
+) -> dict[str, object]:
+    role = _read_property(edge_properties, "role") or _read_property(anchor_properties, "role")
+    return {
+        "id": anchor_id,
+        "role": role,
+        "start_line": _read_int_property(anchor_properties, "start_line"),
+        "start_col": _read_int_property(anchor_properties, "start_col"),
+        "end_line": _read_int_property(anchor_properties, "end_line"),
+        "end_col": _read_int_property(anchor_properties, "end_col"),
+        "source_file": source_file,
+        "properties": dict(anchor_properties),
+    }
+
+
+def _format_source_file(file_node: Mapping[str, object]) -> dict[str, object]:
+    properties = cast(Mapping[str, object], file_node["properties"])
+    return {
+        "id": file_node["id"],
+        "label": file_node["label"],
+        "relative_path": _read_property(properties, "relative_path"),
+        "language": _read_property(properties, "language"),
+        "content_hash": _read_property(properties, "content_hash"),
+        "position_encoding": _read_property(properties, "position_encoding"),
+    }
+
+
+def _source_slices_for_anchors(
+    anchors: list[dict[str, object]],
+    *,
+    source_reader: RepositorySourceReader | None,
+) -> list[dict[str, object]]:
+    if source_reader is None:
+        return []
+
+    source_slices: list[dict[str, object]] = []
+    for anchor in anchors[:DEFAULT_CONTEXT_SOURCE_SLICE_LIMIT]:
+        source_file = anchor.get("source_file")
+        if not isinstance(source_file, dict):
+            continue
+        relative_path = _read_property(source_file, "relative_path")
+        if not relative_path:
+            continue
+        try:
+            source_slice = source_reader.read_slice(
+                relative_path,
+                start_line=int(anchor["start_line"]),
+                end_line=int(anchor["end_line"]),
+            )
+        except (SourcePathError, SourceLineRangeError, SourceFileNotFoundError, SourceReadError):
+            continue
+        source_slices.append(
+            {
+                **source_slice,
+                "anchor": {
+                    "id": anchor["id"],
+                    "role": anchor["role"],
+                    "start_line": anchor["start_line"],
+                    "start_col": anchor["start_col"],
+                    "end_line": anchor["end_line"],
+                    "end_col": anchor["end_col"],
+                },
+                "source_file": source_file,
+            }
+        )
+    return source_slices
+
+
+def _anchor_sort_key(anchor: Mapping[str, object]) -> tuple[int, int, str]:
+    return (
+        _anchor_role_priority(str(anchor["role"])),
+        int(anchor["start_line"]),
+        str(anchor["id"]),
+    )
+
+
+def _anchor_role_priority(role: str) -> int:
+    priorities = {
+        "definition": 0,
+        "body": 1,
+    }
+    return priorities.get(role, 99)
 
 
 def _read_int_property(properties: Mapping[str, object], name: str) -> int:
