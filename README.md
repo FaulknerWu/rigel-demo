@@ -26,6 +26,16 @@ uv run rigel index
 `multilspy` 启动真实 Java LSP 补全跨文件定义跳转、引用与调用关系，并重建
 `.rigel/falkordb.db`。运行前需确保本机 `java` 命令可用。
 
+演示级增量索引可以通过以下命令触发：
+
+```bash
+uv run rigel index --incremental
+```
+
+增量模式会基于 `.rigel/falkordb.db` 中已保存的 Java 文件 `content_hash`
+判断新增、修改、删除和跳过文件；对修改或删除文件删除旧文件子图，对新增或修改文件写入新的文件子图。
+该能力用于本地演示，不包含生产级事务、快照隔离或跨运行 Summary/Embedding 缓存。
+
 启动 Web 演示后端：
 
 ```bash
@@ -150,6 +160,9 @@ Web 后端提供 `/api/recall?q=PaymentService`，流程为：
 4. 沿 `CONTAINS`、`DEPENDS_ON`、`SPECIALIZES`、`ALIASES` 补充一跳上下文。
 
 `/api/chat` 使用这条向量召回链路组装代码图谱上下文；召回为空时不再追加关键词搜索上下文。
+
+Web 图谱面板右下角的增量刷新按钮会调用 `/api/index/incremental`，等价于在当前仓库执行
+`rigel index --incremental`，成功后重新加载图谱并展示新增、修改、删除、跳过文件等统计。
 
 Rigel 主仓库正式的架构决策与主线规划见：
 - GitHub: <https://github.com/FaulknerWu/Rigel>

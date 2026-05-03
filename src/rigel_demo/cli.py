@@ -10,6 +10,7 @@ import webbrowser
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Sequence
 
 from rigel_demo.llm.config import DEFAULT_CHAT_SYSTEM_PROMPT, DEFAULT_SUMMARY_SYSTEM_PROMPT
@@ -83,6 +84,14 @@ class IndexResult:
     indexed_file_count: int
     graph_node_count: int
     graph_edge_count: int
+    index_mode: str = "full"
+    added_files: tuple[str, ...] = ()
+    modified_files: tuple[str, ...] = ()
+    deleted_files: tuple[str, ...] = ()
+    skipped_file_count: int = 0
+    deleted_node_count: int = 0
+    duration_ms: int = 0
+    incremental_fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,11 +144,11 @@ def init_repository(repository_path: Path | None = None) -> InitResult:
     )
 
 
-def index_repository_workspace(repository_path: Path | None = None) -> IndexResult:
+def index_repository_workspace(repository_path: Path | None = None, *, incremental: bool = False) -> IndexResult:
     """扫描目标仓库并重建 Rigel 本地图数据库。"""
 
     from rigel_demo.storage.falkordb_store import FalkorDBConfig, FalkorDBStore
-    from rigel_demo.indexing.repository_indexer import index_repository
+    from rigel_demo.indexing.repository_indexer import index_repository, index_repository_incremental
 
     resolved_repository_path = (repository_path or Path.cwd()).resolve()
     workspace_path = resolved_repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
@@ -151,6 +160,45 @@ def index_repository_workspace(repository_path: Path | None = None) -> IndexResu
         raise FileNotFoundError(f"未找到配置文件，请先执行 rigel init 并填写配置：{config_path}")
 
     workspace_path.mkdir(parents=True, exist_ok=True)
+    started_at = perf_counter()
+
+    if incremental and database_artifact_exists(database_path):
+        store = FalkorDBStore.connect(
+            FalkorDBConfig(
+                graph_name=DEFAULT_GRAPH_NAME,
+                database_path=str(database_path),
+            )
+        )
+        index_result = index_repository_incremental(
+            resolved_repository_path,
+            previous_file_hashes=store.list_java_file_hashes(),
+        )
+        deleted_node_count = store.delete_file_subgraphs(
+            [*index_result.modified_files, *index_result.deleted_files]
+        )
+        if index_result.graph.nodes or index_result.graph.edges:
+            store.upsert_graph(index_result.graph)
+        graph_node_count, graph_edge_count = store.graph_counts()
+        result = IndexResult(
+            repository_path=str(resolved_repository_path),
+            workspace_path=str(workspace_path),
+            database_path=str(database_path),
+            state_path=str(state_path),
+            graph_name=DEFAULT_GRAPH_NAME,
+            indexed_file_count=index_result.indexed_file_count,
+            graph_node_count=graph_node_count,
+            graph_edge_count=graph_edge_count,
+            index_mode="incremental",
+            added_files=tuple(index_result.added_files),
+            modified_files=tuple(index_result.modified_files),
+            deleted_files=tuple(index_result.deleted_files),
+            skipped_file_count=len(index_result.skipped_files),
+            deleted_node_count=deleted_node_count,
+            duration_ms=_duration_ms(started_at),
+        )
+        _write_workspace_state(state_path, result)
+        return result
+
     _remove_database_artifacts(database_path)
     index_result = index_repository(resolved_repository_path)
     FalkorDBStore.connect(
@@ -169,6 +217,9 @@ def index_repository_workspace(repository_path: Path | None = None) -> IndexResu
         indexed_file_count=index_result.indexed_file_count,
         graph_node_count=len(index_result.graph.nodes),
         graph_edge_count=len(index_result.graph.edges),
+        index_mode="full",
+        duration_ms=_duration_ms(started_at),
+        incremental_fallback=incremental,
     )
     _write_workspace_state(state_path, result)
     return result
@@ -194,6 +245,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "index",
         help="为当前仓库生成或重建 Rigel 本地图数据库。",
         description="读取当前目录 .rigel/config.json，扫描源码并重建 .rigel/falkordb.db。",
+    )
+    index_parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="基于已有图数据库执行演示级增量索引；缺少数据库时自动执行全量索引。",
     )
     index_parser.set_defaults(command_handler=_handle_index_command)
 
@@ -224,7 +280,7 @@ def _handle_index_command(_args: argparse.Namespace) -> int:
     """处理 index 命令。"""
 
     try:
-        result = index_repository_workspace()
+        result = index_repository_workspace(incremental=_args.incremental)
     except FileNotFoundError as error:
         print(str(error))
         return 1
@@ -233,9 +289,24 @@ def _handle_index_command(_args: argparse.Namespace) -> int:
     print(f"仓库目录: {result.repository_path}")
     print(f"工作目录: {result.workspace_path}")
     print(f"图数据库: {result.database_path}")
+    print(f"索引模式: {_index_mode_label(result)}")
     print(f"索引文件: {result.indexed_file_count}")
     print(f"图谱节点: {result.graph_node_count}")
     print(f"图谱边: {result.graph_edge_count}")
+    print(f"耗时: {result.duration_ms} ms")
+    if result.index_mode == "incremental":
+        print(f"新增文件: {len(result.added_files)}")
+        print(f"修改文件: {len(result.modified_files)}")
+        print(f"删除文件: {len(result.deleted_files)}")
+        print(f"跳过文件: {result.skipped_file_count}")
+        print(f"删除旧节点: {result.deleted_node_count}")
+        for label, files in (
+            ("新增", result.added_files),
+            ("修改", result.modified_files),
+            ("删除", result.deleted_files),
+        ):
+            for relative_path in files:
+                print(f"{label}: {relative_path}")
     return 0
 
 
@@ -366,11 +437,49 @@ def _write_workspace_state(state_path: Path, result: IndexResult) -> None:
     state = {
         **asdict(result),
         "indexed_at": datetime.now(UTC).isoformat(),
+        "last_index_mode": result.index_mode,
+        "last_index_result": index_result_payload(result),
+        "last_incremental_result": (
+            index_result_payload(result)
+            if result.index_mode == "incremental" or result.incremental_fallback
+            else None
+        ),
     }
     state_path.write_text(
         json.dumps(state, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def index_result_payload(result: IndexResult) -> dict[str, object]:
+    """把索引结果转换成 CLI 和 Web 可共用的展示载荷。"""
+
+    return {
+        "mode": result.index_mode,
+        "mode_label": _index_mode_label(result),
+        "added_files": list(result.added_files),
+        "modified_files": list(result.modified_files),
+        "deleted_files": list(result.deleted_files),
+        "skipped_file_count": result.skipped_file_count,
+        "indexed_file_count": result.indexed_file_count,
+        "deleted_node_count": result.deleted_node_count,
+        "graph_node_count": result.graph_node_count,
+        "graph_edge_count": result.graph_edge_count,
+        "duration_ms": result.duration_ms,
+        "incremental_fallback": result.incremental_fallback,
+    }
+
+
+def _index_mode_label(result: IndexResult) -> str:
+    if result.index_mode == "incremental":
+        return "增量"
+    if result.incremental_fallback:
+        return "全量（增量首次初始化）"
+    return "全量"
+
+
+def _duration_ms(started_at: float) -> int:
+    return int((perf_counter() - started_at) * 1000)
 
 
 def database_artifact_exists(database_path: Path) -> bool:

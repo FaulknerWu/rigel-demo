@@ -69,6 +69,8 @@ def enrich_java_semantic_edges(
     *,
     request: JavaSemanticEdgeRequest,
     lsp_client: JavaLspClient | None = None,
+    source_file_paths: set[str] | None = None,
+    target_file_paths: set[str] | None = None,
 ) -> GraphIR:
     """在已有结构图上补全 Java 跨文件语义边。
 
@@ -82,7 +84,11 @@ def enrich_java_semantic_edges(
 
     with lsp_context as active_lsp:
         # 候选边先由 Tree-sitter 定位语法位置，再交给 LSP 解析真实目标，兼顾覆盖率和语义精度。
-        for candidate in _collect_tree_sitter_candidates(repository_root, graph_index):
+        for candidate in _collect_tree_sitter_candidates(
+            repository_root,
+            graph_index,
+            source_file_paths=source_file_paths,
+        ):
             target_entity = _resolve_lsp_target(active_lsp, repository_root, graph_index, candidate)
             if target_entity is not None and target_entity.node.id != candidate.source_entity_id:
                 _add_semantic_edge(
@@ -94,7 +100,13 @@ def enrich_java_semantic_edges(
                 )
 
         # references 与 override 依赖完整实体索引，放在候选边补全后统一追加，避免重复扫描 AST。
-        _add_lsp_reference_edges(graph, active_lsp, repository_root, graph_index)
+        _add_lsp_reference_edges(
+            graph,
+            active_lsp,
+            repository_root,
+            graph_index,
+            target_file_paths=target_file_paths,
+        )
         _add_override_edges(graph, graph_index)
         _add_alias_edges(graph, graph_index)
 
@@ -107,12 +119,19 @@ def _started_lsp(repository_root: Path, timeout_seconds: int) -> ContextManager[
     return language_server.start_server()
 
 
-def _collect_tree_sitter_candidates(repository_root: Path, graph_index: GraphIndex) -> list[_SemanticCandidate]:
+def _collect_tree_sitter_candidates(
+    repository_root: Path,
+    graph_index: GraphIndex,
+    *,
+    source_file_paths: set[str] | None = None,
+) -> list[_SemanticCandidate]:
     candidates: list[_SemanticCandidate] = []
     parser = Parser()
     parser.language = JAVA_LANGUAGE
 
     for file_path in graph_index.java_file_paths:
+        if source_file_paths is not None and file_path not in source_file_paths:
+            continue
         source_path = repository_root / file_path
         source_bytes = source_path.read_bytes()
         root_node = parser.parse(source_bytes).root_node
@@ -209,8 +228,12 @@ def _add_lsp_reference_edges(
     lsp_client: JavaLspClient,
     repository_root: Path,
     graph_index: GraphIndex,
+    *,
+    target_file_paths: set[str] | None = None,
 ) -> None:
     for target_entity in graph_index.entities:
+        if target_file_paths is not None and target_entity.file_path not in target_file_paths:
+            continue
         anchor = target_entity.name_anchor or target_entity.definition_anchor
         if anchor is None:
             continue

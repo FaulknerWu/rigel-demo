@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -224,6 +226,55 @@ class WebAppLLMTest(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(fake_llm.messages[0], LLMMessage(role="user", content="NoMatch"))
+
+    def test_incremental_index_endpoint_returns_shared_result_payload(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
+
+            with patch("rigel_demo.web.app.index_repository_workspace") as index_repository_workspace:
+                index_repository_workspace.return_value = SimpleNamespace(
+                    index_mode="incremental",
+                    added_files=("src/main/java/demo/Added.java",),
+                    modified_files=(),
+                    deleted_files=(),
+                    skipped_file_count=1,
+                    indexed_file_count=1,
+                    deleted_node_count=0,
+                    graph_node_count=12,
+                    graph_edge_count=9,
+                    duration_ms=25,
+                    incremental_fallback=False,
+                )
+
+                response = client.post("/api/index/incremental")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["result"]
+        self.assertEqual(payload["mode"], "incremental")
+        self.assertEqual(payload["added_files"], ["src/main/java/demo/Added.java"])
+        self.assertEqual(payload["skipped_file_count"], 1)
+        self.assertEqual(payload["graph_node_count"], 12)
+        index_repository_workspace.assert_called_once_with(repository_path.resolve(), incremental=True)
+
+    def test_store_delete_file_subgraphs_removes_file_owned_metadata(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            database_path = _write_demo_graph(repository_path, fake_embedding)
+            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
+
+            deleted_count = store.delete_file_subgraphs(["src/main/java/demo/PaymentService.java"])
+            remaining_files = store.graph.query("MATCH (file:RigelNode:File) RETURN count(file)").result_set
+            remaining_summaries = store.graph.query("MATCH (summary:RigelNode:Summary) RETURN count(summary)").result_set
+            remaining_repositories = store.graph.query("MATCH (repo:RigelNode:Repository) RETURN count(repo)").result_set
+
+        self.assertGreater(deleted_count, 0)
+        self.assertEqual(remaining_files[0][0], 0)
+        self.assertEqual(remaining_summaries[0][0], 1)
+        self.assertEqual(remaining_repositories[0][0], 1)
 
 
 def _write_demo_graph(

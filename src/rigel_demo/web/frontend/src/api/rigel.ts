@@ -69,6 +69,26 @@ export interface ApiChatResponse {
   provider: string;
 }
 
+export interface ApiIndexResult {
+  mode: string;
+  mode_label: string;
+  added_files: string[];
+  modified_files: string[];
+  deleted_files: string[];
+  skipped_file_count: number;
+  indexed_file_count: number;
+  deleted_node_count: number;
+  graph_node_count: number;
+  graph_edge_count: number;
+  duration_ms: number;
+  incremental_fallback: boolean;
+}
+
+export interface ApiIncrementalIndexResponse {
+  status: string;
+  result: ApiIndexResult;
+}
+
 export interface GraphNode {
   id: string;
   name: string;
@@ -108,6 +128,21 @@ export interface RecallResult {
 
 export type ChatMessage = ApiChatMessage;
 
+export interface IndexResult {
+  mode: string;
+  modeLabel: string;
+  addedFiles: string[];
+  modifiedFiles: string[];
+  deletedFiles: string[];
+  skippedFileCount: number;
+  indexedFileCount: number;
+  deletedNodeCount: number;
+  graphNodeCount: number;
+  graphEdgeCount: number;
+  durationMs: number;
+  incrementalFallback: boolean;
+}
+
 const NODE_TYPE_COLORS = [
   '#f87171',
   '#fb923c',
@@ -146,6 +181,12 @@ export async function sendChatMessage(messages: ChatMessage[]): Promise<ChatMess
   });
   const payload = await readJson<ApiChatResponse>(response);
   return payload.message;
+}
+
+export async function runIncrementalIndex(): Promise<IndexResult> {
+  const response = await fetch('/api/index/incremental', { method: 'POST' });
+  const payload = await readJson<ApiIncrementalIndexResponse>(response);
+  return adaptIndexResult(payload.result);
 }
 
 export function adaptGraph(graph: ApiGraph): GraphData {
@@ -188,6 +229,23 @@ export function adaptRecallResult(result: ApiRecallResult): RecallResult {
       edgeType: related.edge.type,
       node: adaptNode(related.node),
     })),
+  };
+}
+
+export function adaptIndexResult(result: ApiIndexResult): IndexResult {
+  return {
+    mode: result.mode,
+    modeLabel: result.mode_label,
+    addedFiles: result.added_files,
+    modifiedFiles: result.modified_files,
+    deletedFiles: result.deleted_files,
+    skippedFileCount: result.skipped_file_count,
+    indexedFileCount: result.indexed_file_count,
+    deletedNodeCount: result.deleted_node_count,
+    graphNodeCount: result.graph_node_count,
+    graphEdgeCount: result.graph_edge_count,
+    durationMs: result.duration_ms,
+    incrementalFallback: result.incremental_fallback,
   };
 }
 

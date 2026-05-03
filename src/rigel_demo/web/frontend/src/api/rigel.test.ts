@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { adaptGraph, adaptNode, adaptRecallResult, adaptSummary, type ApiGraph, type ApiNode, type ApiRecallResult, type ApiSummary } from './rigel';
+import { adaptGraph, adaptIndexResult, adaptNode, adaptRecallResult, adaptSummary, type ApiGraph, type ApiIndexResult, type ApiNode, type ApiRecallResult, type ApiSummary } from './rigel';
 
 const apiNode: ApiNode = {
   id: 'node-1',
@@ -87,3 +87,25 @@ assert.equal(adaptedRecallResult.node.name, 'RepositoryIndexer');
 assert.deepEqual(adaptedRecallResult.related.map((related) => [related.direction, related.edgeType, related.node.name]), [
   ['outgoing', 'CALLS', 'GraphIR'],
 ]);
+
+const apiIndexResult: ApiIndexResult = {
+  mode: 'incremental',
+  mode_label: '增量',
+  added_files: ['src/main/java/demo/Added.java'],
+  modified_files: ['src/main/java/demo/Changed.java'],
+  deleted_files: [],
+  skipped_file_count: 2,
+  indexed_file_count: 2,
+  deleted_node_count: 4,
+  graph_node_count: 30,
+  graph_edge_count: 24,
+  duration_ms: 120,
+  incremental_fallback: false,
+};
+
+const indexResult = adaptIndexResult(apiIndexResult);
+assert.equal(indexResult.modeLabel, '增量');
+assert.deepEqual(indexResult.addedFiles, ['src/main/java/demo/Added.java']);
+assert.equal(indexResult.modifiedFiles.length, 1);
+assert.equal(indexResult.skippedFileCount, 2);
+assert.equal(indexResult.graphEdgeCount, 24);

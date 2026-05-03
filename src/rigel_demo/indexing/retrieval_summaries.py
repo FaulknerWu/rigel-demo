@@ -47,6 +47,7 @@ def attach_retrieval_summaries(
     *,
     embedding_client: SummaryEmbeddingClient | RigelEmbedding,
     summary_client: SummaryTextClient | RigelLLM,
+    target_node_ids: set[str] | None = None,
 ) -> GraphIR:
     """为可召回节点追加 Summary 节点和 DESCRIBES 边。"""
 
@@ -56,6 +57,7 @@ def attach_retrieval_summaries(
         node
         for node in graph.nodes
         if node.type in _SUMMARY_TARGET_TYPES
+        and (target_node_ids is None or node.id in target_node_ids)
     ]
     summary_texts = [
         _generate_summary_text(target_node, summary_client=summary_client)

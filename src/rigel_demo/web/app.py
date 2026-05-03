@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from threading import Lock
 from typing import Any, Literal, cast
 
 from fastapi import FastAPI, HTTPException
@@ -17,6 +18,8 @@ from rigel_demo.cli import (
     WEB_STATIC_DIRECTORY_NAME,
     WORKSPACE_STATE_FILE_NAME,
     database_artifact_exists,
+    index_repository_workspace,
+    index_result_payload,
 )
 from rigel_demo.embedding import (
     EmbeddingConfig,
@@ -68,6 +71,7 @@ def create_app(
     source_reader = RepositorySourceReader(resolved_repository_path)
     active_chat_client = _resolve_chat_client(resolved_repository_path, chat_client)
     active_embedding_client = _resolve_embedding_client(resolved_repository_path, embedding_client)
+    incremental_index_lock = Lock()
 
     app = FastAPI(title="Rigel Demo", version="0.1.0")
 
@@ -194,6 +198,26 @@ def create_app(
                 expansion_limit=DEFAULT_RECALL_EXPANSION_LIMIT,
                 source_reader=source_reader,
             ),
+        }
+
+    @app.post("/api/index/incremental")
+    def incremental_index() -> dict[str, object]:
+        """执行演示级增量索引并更新当前图数据库。"""
+
+        _ensure_database_exists(database_path)
+        if not incremental_index_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="增量索引正在执行，请稍后再试")
+
+        try:
+            result = index_repository_workspace(resolved_repository_path, incremental=True)
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=f"增量索引失败：{error}") from error
+        finally:
+            incremental_index_lock.release()
+
+        return {
+            "status": "success",
+            "result": index_result_payload(result),
         }
 
     @app.post("/api/chat")

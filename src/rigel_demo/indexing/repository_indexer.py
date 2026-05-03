@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from rigel_demo.core.graph_ir import GraphIR, Repository
+from rigel_demo.core.graph_ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType, Repository
 from rigel_demo.embedding import EmbeddingConfig, RigelEmbedding
 from rigel_demo.indexing.retrieval_summaries import (
     SummaryEmbeddingClient,
@@ -56,6 +57,8 @@ TOOLING_PATH_PARTS = {"tool", "tools", "tooling", "script", "scripts", "buildsrc
 VENDOR_PATH_PARTS = {"vendor", "third_party", "third-party", "external"}
 GENERATED_PATH_PARTS = {"generated", "generated-sources", "build", "out", "target"}
 GENERATED_SOURCE_MARKER_PARTS = {"generated", "generated-sources"}
+HASH_PREFIX = "sha256:"
+SEMANTIC_EDGE_TYPES = {EdgeType.DEPENDS_ON, EdgeType.SPECIALIZES, EdgeType.ALIASES}
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +80,24 @@ class RepositoryIndexResult:
 
     graph: GraphIR
     indexed_file_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryIncrementalIndexResult:
+    """仓库增量索引结果。"""
+
+    graph: GraphIR
+    added_files: list[str]
+    modified_files: list[str]
+    deleted_files: list[str]
+    skipped_files: list[str]
+    indexed_file_count: int
+
+    @property
+    def changed_file_count(self) -> int:
+        """发生新增、修改或删除的文件数量。"""
+
+        return len(self.added_files) + len(self.modified_files) + len(self.deleted_files)
 
 
 def index_repository(
@@ -125,6 +146,98 @@ def index_repository(
     )
 
     return RepositoryIndexResult(graph=graph, indexed_file_count=indexed_file_count)
+
+
+def index_repository_incremental(
+    repository_path: Path,
+    *,
+    previous_file_hashes: dict[str, str],
+    embedding_client: SummaryEmbeddingClient | RigelEmbedding | None = None,
+    summary_client: SummaryTextClient | RigelLLM | None = None,
+) -> RepositoryIncrementalIndexResult:
+    """构建新增和修改 Java 文件对应的可写入增量图谱。"""
+
+    resolved_repository_path = repository_path.resolve()
+    repository_name = resolved_repository_path.name
+    targets = _iter_java_targets(resolved_repository_path)
+    current_file_hashes = _current_file_hashes(targets)
+
+    current_paths = set(current_file_hashes)
+    previous_paths = set(previous_file_hashes)
+    added_files = sorted(current_paths - previous_paths)
+    modified_files = sorted(
+        path
+        for path in current_paths & previous_paths
+        if current_file_hashes[path] != previous_file_hashes[path]
+    )
+    deleted_files = sorted(previous_paths - current_paths)
+    skipped_files = sorted(
+        path
+        for path in current_paths & previous_paths
+        if current_file_hashes[path] == previous_file_hashes[path]
+    )
+    changed_existing_files = added_files + modified_files
+
+    if not changed_existing_files:
+        return RepositoryIncrementalIndexResult(
+            graph=GraphIR(),
+            added_files=added_files,
+            modified_files=modified_files,
+            deleted_files=deleted_files,
+            skipped_files=skipped_files,
+            indexed_file_count=0,
+        )
+
+    active_embedding_client = embedding_client or RigelEmbedding(
+        EmbeddingConfig.from_repository(resolved_repository_path)
+    )
+    active_summary_client = summary_client or RigelLLM(
+        LLMConfig.from_repository(resolved_repository_path, LLMConfigSection.SUMMARY)
+    )
+
+    full_graph = _base_graph(repository_name)
+    for target in targets:
+        request = JavaParseRequest(
+            repository_name=repository_name,
+            module_name=target.module_name,
+            module_root_path=target.module_root_path,
+            module_ecosystem=target.module_ecosystem,
+            zone=target.module_zone,
+            file_zone=target.file_zone,
+        )
+        file_graph = parse_java_file(target.source_path.read_bytes(), target.relative_path, request=request)
+        _merge_graph(full_graph, file_graph)
+
+    changed_file_paths = set(changed_existing_files)
+    enrich_java_semantic_edges(
+        full_graph,
+        request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
+        source_file_paths=changed_file_paths,
+        target_file_paths=changed_file_paths,
+    )
+
+    selected_node_ids = _incremental_node_ids(full_graph, changed_file_paths)
+    summary_target_node_ids = {
+        node.id
+        for node in full_graph.nodes
+        if node.id in selected_node_ids and node.type in {NodeType.MODULE, NodeType.FILE, NodeType.ENTITY}
+    }
+    attach_retrieval_summaries(
+        full_graph,
+        embedding_client=active_embedding_client,
+        summary_client=active_summary_client,
+        target_node_ids=summary_target_node_ids,
+    )
+    selected_node_ids.update(_summary_node_ids_for_targets(full_graph, summary_target_node_ids))
+
+    return RepositoryIncrementalIndexResult(
+        graph=_select_incremental_graph(full_graph, selected_node_ids),
+        added_files=added_files,
+        modified_files=modified_files,
+        deleted_files=deleted_files,
+        skipped_files=skipped_files,
+        indexed_file_count=len(changed_existing_files),
+    )
 
 
 def _base_graph(repository_name: str) -> GraphIR:
@@ -233,6 +346,110 @@ def _detect_module_ecosystem(repository_path: Path, module_root: Path) -> str:
     if any((absolute_module_root / marker).exists() for marker in GRADLE_MARKER_FILE_NAMES):
         return "gradle"
     return DEFAULT_MODULE_ECOSYSTEM
+
+
+def _current_file_hashes(targets: list[JavaFileIndexTarget]) -> dict[str, str]:
+    return {
+        target.relative_path: _content_hash(target.source_path.read_bytes())
+        for target in targets
+    }
+
+
+def _content_hash(content: bytes) -> str:
+    return f"{HASH_PREFIX}{hashlib.sha256(content).hexdigest()}"
+
+
+def _incremental_node_ids(graph: GraphIR, changed_file_paths: set[str]) -> set[str]:
+    nodes_by_id = {node.id: node for node in graph.nodes}
+    file_ids = {
+        node.id
+        for node in graph.nodes
+        if node.type == NodeType.FILE and node.properties.get("relative_path") in changed_file_paths
+    }
+    children_by_parent: dict[str, list[str]] = {}
+    parent_by_child: dict[str, str] = {}
+    for edge in graph.edges:
+        if edge.type != EdgeType.CONTAINS:
+            continue
+        children_by_parent.setdefault(edge.source_id, []).append(edge.target_id)
+        parent_by_child[edge.target_id] = edge.source_id
+
+    selected_node_ids: set[str] = set()
+    for file_id in file_ids:
+        selected_node_ids.update(_ancestor_node_ids(file_id, parent_by_child, nodes_by_id))
+        selected_node_ids.update(_descendant_node_ids(file_id, children_by_parent))
+
+    for edge in graph.edges:
+        if edge.type == EdgeType.HAS_ANCHOR and edge.source_id in selected_node_ids:
+            selected_node_ids.add(edge.target_id)
+    return selected_node_ids
+
+
+def _ancestor_node_ids(
+    node_id: str,
+    parent_by_child: dict[str, str],
+    nodes_by_id: dict[str, GraphNode],
+) -> set[str]:
+    ancestors: set[str] = set()
+    current_node_id: str | None = node_id
+    while current_node_id is not None and current_node_id not in ancestors:
+        node = nodes_by_id.get(current_node_id)
+        if node is not None and node.type in {NodeType.REPOSITORY, NodeType.MODULE, NodeType.FILE}:
+            ancestors.add(current_node_id)
+        current_node_id = parent_by_child.get(current_node_id)
+    return ancestors
+
+
+def _descendant_node_ids(node_id: str, children_by_parent: dict[str, list[str]]) -> set[str]:
+    descendants: set[str] = set()
+    stack = [node_id]
+    while stack:
+        current_node_id = stack.pop()
+        if current_node_id in descendants:
+            continue
+        descendants.add(current_node_id)
+        stack.extend(children_by_parent.get(current_node_id, []))
+    return descendants
+
+
+def _summary_node_ids_for_targets(graph: GraphIR, target_node_ids: set[str]) -> set[str]:
+    return {
+        edge.source_id
+        for edge in graph.edges
+        if edge.type == EdgeType.DESCRIBES and edge.target_id in target_node_ids
+    }
+
+
+def _select_incremental_graph(graph: GraphIR, selected_node_ids: set[str]) -> GraphIR:
+    selected_nodes = [
+        node
+        for node in graph.nodes
+        if node.id in selected_node_ids
+    ]
+    incremental_owner_node_ids = {
+        node.id
+        for node in selected_nodes
+        if node.type in {NodeType.FILE, NodeType.ENTITY}
+    }
+    selected_edges = [
+        edge
+        for edge in graph.edges
+        if _should_select_incremental_edge(edge, selected_node_ids, incremental_owner_node_ids)
+    ]
+    return GraphIR(nodes=selected_nodes, edges=selected_edges)
+
+
+def _should_select_incremental_edge(
+    edge: GraphEdge,
+    selected_node_ids: set[str],
+    incremental_owner_node_ids: set[str],
+) -> bool:
+    if edge.source_id in selected_node_ids and edge.target_id in selected_node_ids:
+        return True
+    return (
+        edge.type in SEMANTIC_EDGE_TYPES
+        and (edge.source_id in incremental_owner_node_ids or edge.target_id in incremental_owner_node_ids)
+    )
 
 
 def _merge_graph(target: GraphIR, source: GraphIR) -> None:

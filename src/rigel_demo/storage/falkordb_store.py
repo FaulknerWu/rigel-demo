@@ -59,6 +59,73 @@ class FalkorDBStore:
         if summary_embedding_dimensions is not None:
             self.ensure_summary_vector_index(dimensions=summary_embedding_dimensions)
 
+    def list_java_file_hashes(self) -> dict[str, str]:
+        """读取当前图数据库中已索引 Java 文件的内容哈希。"""
+
+        rows = self._graph.query(
+            """
+            MATCH (file:RigelNode:File)
+            WHERE file.language = $language
+            RETURN file.relative_path, file.content_hash
+            """,
+            {"language": "java"},
+        ).result_set
+        file_hashes: dict[str, str] = {}
+        for relative_path, content_hash in rows:
+            if isinstance(relative_path, str) and isinstance(content_hash, str):
+                file_hashes[relative_path] = content_hash
+        return file_hashes
+
+    def delete_file_subgraphs(self, relative_paths: list[str]) -> int:
+        """删除指定文件及其子实体、锚点、摘要节点。"""
+
+        if not relative_paths:
+            return 0
+
+        parameters = {"relative_paths": relative_paths}
+        deleted_count = self._graph.query(
+            """
+            MATCH (file:RigelNode:File)
+            WHERE file.relative_path IN $relative_paths
+            MATCH (file)-[:CONTAINS*0..]->(owner:RigelNode)
+            OPTIONAL MATCH (owner)-[:HAS_ANCHOR]->(anchor:RigelNode:Anchor)
+            OPTIONAL MATCH (summary:RigelNode:Summary)-[:DESCRIBES]->(owner)
+            WITH collect(DISTINCT owner) + collect(DISTINCT anchor) + collect(DISTINCT summary) AS nodes
+            UNWIND nodes AS node
+            WITH DISTINCT node
+            WHERE node IS NOT NULL
+            RETURN count(node)
+            """,
+            parameters,
+        ).result_set
+        node_count = int(deleted_count[0][0]) if deleted_count else 0
+
+        self._graph.query(
+            """
+            MATCH (file:RigelNode:File)
+            WHERE file.relative_path IN $relative_paths
+            MATCH (file)-[:CONTAINS*0..]->(owner:RigelNode)
+            OPTIONAL MATCH (owner)-[:HAS_ANCHOR]->(anchor:RigelNode:Anchor)
+            OPTIONAL MATCH (summary:RigelNode:Summary)-[:DESCRIBES]->(owner)
+            WITH collect(DISTINCT owner) + collect(DISTINCT anchor) + collect(DISTINCT summary) AS nodes
+            UNWIND nodes AS node
+            WITH DISTINCT node
+            WHERE node IS NOT NULL
+            DELETE node
+            """,
+            parameters,
+        )
+        return node_count
+
+    def graph_counts(self) -> tuple[int, int]:
+        """统计当前 Rigel 图谱的节点和边数量。"""
+
+        node_rows = self._graph.query("MATCH (node:RigelNode) RETURN count(node)").result_set
+        edge_rows = self._graph.query("MATCH (:RigelNode)-[edge]->(:RigelNode) RETURN count(edge)").result_set
+        node_count = int(node_rows[0][0]) if node_rows else 0
+        edge_count = int(edge_rows[0][0]) if edge_rows else 0
+        return node_count, edge_count
+
     def upsert_node(self, node: GraphNode) -> None:
         """写入或更新单个 GraphIR 节点。"""
 

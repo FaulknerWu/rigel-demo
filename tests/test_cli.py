@@ -20,6 +20,7 @@ from rigel_demo.cli import (
     main,
 )
 from rigel_demo.core import EdgeType, GraphEdge, GraphIR, Module, Repository
+from rigel_demo.storage import FalkorDBConfig, FalkorDBStore
 
 
 class CliInitTest(TestCase):
@@ -79,6 +80,39 @@ class CliIndexTest(TestCase):
             self.assertEqual(state["graph_name"], DEFAULT_GRAPH_NAME)
             self.assertEqual(state["database_path"], str(database_path))
             self.assertIn("indexed_at", state)
+            self.assertEqual(state["last_index_mode"], "full")
+
+    def test_incremental_index_workspace_updates_database_and_state(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            config_path = repository_path / ".rigel" / "config.json"
+            database_path = repository_path / ".rigel" / "falkordb.db"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(json.dumps(DEFAULT_CONFIG_DOCUMENT, ensure_ascii=False) + "\n", encoding="utf-8")
+            FalkorDBStore.connect(
+                FalkorDBConfig(graph_name=DEFAULT_GRAPH_NAME, database_path=str(database_path))
+            ).upsert_graph(_demo_graph())
+
+            with patch("rigel_demo.indexing.repository_indexer.index_repository_incremental") as index_repository_incremental:
+                index_repository_incremental.return_value = SimpleNamespace(
+                    graph=GraphIR(),
+                    added_files=["src/main/java/demo/Added.java"],
+                    modified_files=[],
+                    deleted_files=[],
+                    skipped_files=["src/main/java/demo/Stable.java"],
+                    indexed_file_count=1,
+                )
+
+                result = index_repository_workspace(repository_path, incremental=True)
+
+            state = json.loads((repository_path / ".rigel" / "rigel.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.index_mode, "incremental")
+        self.assertEqual(result.added_files, ("src/main/java/demo/Added.java",))
+        self.assertEqual(result.skipped_file_count, 1)
+        self.assertEqual(state["last_index_mode"], "incremental")
+        self.assertEqual(state["last_incremental_result"]["added_files"], ["src/main/java/demo/Added.java"])
+        self.assertEqual(state["last_incremental_result"]["skipped_file_count"], 1)
 
 
 class CliWebConfigTest(TestCase):

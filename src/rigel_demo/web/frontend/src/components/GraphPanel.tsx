@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
-import { Maximize, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
-import { fetchGraph, fetchSummary, type GraphData, type GraphSummary } from '../api/rigel';
+import { Maximize, RefreshCw, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
+import { fetchGraph, fetchSummary, runIncrementalIndex, type GraphData, type GraphSummary, type IndexResult } from '../api/rigel';
 
 const EMPTY_GRAPH: GraphData = { nodes: [], links: [] };
 const EMPTY_SUMMARY: GraphSummary = { nodeCount: 0, edgeCount: 0, nodeTypes: [] };
@@ -13,6 +13,7 @@ export default function GraphPanel() {
   const [graphData, setGraphData] = useState<GraphData>(EMPTY_GRAPH);
   const [summary, setSummary] = useState<GraphSummary>(EMPTY_SUMMARY);
   const [isLoading, setIsLoading] = useState(true);
+  const [isIndexing, setIsIndexing] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
 
   useEffect(() => {
@@ -67,6 +68,22 @@ export default function GraphPanel() {
   const fitGraph = () => {
     if (!graphRef.current) return;
     graphRef.current.zoomToFit(500, 80);
+  };
+
+  const refreshIncrementally = async () => {
+    if (isIndexing) return;
+    setIsIndexing(true);
+    setErrorMessage('');
+
+    try {
+      const result = await runIncrementalIndex();
+      await loadGraph();
+      window.alert(formatIndexResultMessage(result));
+    } catch (error) {
+      window.alert(`增量索引失败：${error instanceof Error ? error.message : '请求失败'}`);
+    } finally {
+      setIsIndexing(false);
+    }
   };
 
   return (
@@ -224,7 +241,44 @@ export default function GraphPanel() {
         <button onClick={loadGraph} className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-400 backdrop-blur-md transition-colors hover:bg-white/10 hover:text-white" aria-label="重新加载图谱">
           <RotateCcw className="h-4 w-4" />
         </button>
+        <button
+          onClick={refreshIncrementally}
+          disabled={isIndexing}
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-400 backdrop-blur-md transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+          aria-label="执行增量索引"
+        >
+          <RefreshCw className={`h-4 w-4 ${isIndexing ? 'animate-spin' : ''}`} />
+        </button>
       </div>
     </div>
   );
+}
+
+function formatIndexResultMessage(result: IndexResult): string {
+  const lines = [
+    '增量索引完成',
+    `模式：${result.modeLabel}`,
+    `新增文件：${result.addedFiles.length}`,
+    `修改文件：${result.modifiedFiles.length}`,
+    `删除文件：${result.deletedFiles.length}`,
+    `跳过文件：${result.skippedFileCount}`,
+    `删除旧节点：${result.deletedNodeCount}`,
+    `图谱规模：${result.graphNodeCount} 节点 / ${result.graphEdgeCount} 边`,
+    `耗时：${result.durationMs} ms`,
+  ];
+
+  for (const [label, files] of [
+    ['新增', result.addedFiles],
+    ['修改', result.modifiedFiles],
+    ['删除', result.deletedFiles],
+  ] as const) {
+    for (const file of files.slice(0, 5)) {
+      lines.push(`${label}：${file}`);
+    }
+    if (files.length > 5) {
+      lines.push(`${label}：另有 ${files.length - 5} 个文件`);
+    }
+  }
+
+  return lines.join('\n');
 }
