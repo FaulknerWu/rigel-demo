@@ -87,7 +87,7 @@ class RigelLLM:
 
         completion = self._client.chat.completions.create(**request_body)
         for choice in completion.choices:
-            content = getattr(choice.message, "content", None)
+            content = choice.message.content
             if isinstance(content, str) and content.strip():
                 return content.strip()
         raise LLMResponseError("LLM 未返回可展示文本")

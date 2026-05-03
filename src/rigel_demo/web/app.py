@@ -7,12 +7,11 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from rigel_demo.cli import (
-    DEFAULT_GRAPH_NAME,
     FALKORDB_DATABASE_FILE_NAME,
     RIGEL_WORKSPACE_DIRECTORY_NAME,
     WEB_STATIC_DIRECTORY_NAME,
@@ -21,7 +20,6 @@ from rigel_demo.cli import (
 )
 from rigel_demo.embedding import (
     EmbeddingConfig,
-    EmbeddingConfigurationError,
     EmbeddingRequestError,
     EmbeddingResponseError,
     RigelEmbedding,
@@ -32,7 +30,6 @@ from rigel_demo.indexing.retrieval_summaries import (
 from rigel_demo.llm import (
     LLMConfig,
     LLMConfigSection,
-    LLMConfigurationError,
     LLMMessage,
     LLMRequestError,
     LLMResponseError,
@@ -69,14 +66,12 @@ def create_app(
     # Web 入口复用 CLI 索引状态，确保展示和 `rigel index` 写入的是同一个本地图谱。
     graph_reader = RigelGraphReader(database_path=database_path, graph_name=graph_name)
     source_reader = RepositorySourceReader(resolved_repository_path)
-    active_chat_client, chat_configuration_error = _resolve_chat_client(resolved_repository_path, chat_client)
-    active_embedding_client, embedding_configuration_error = _resolve_embedding_client(resolved_repository_path, embedding_client)
+    active_chat_client = _resolve_chat_client(resolved_repository_path, chat_client)
+    active_embedding_client = _resolve_embedding_client(resolved_repository_path, embedding_client)
 
     app = FastAPI(title="Rigel Demo", version="0.1.0")
 
-    if static_assets_path.exists():
-        # 前端构建产物由 CLI 放入 .rigel，开发阶段不存在时继续暴露 API 和占位页。
-        app.mount("/assets", StaticFiles(directory=static_assets_path), name="assets")
+    app.mount("/assets", StaticFiles(directory=static_assets_path), name="assets")
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
@@ -88,8 +83,8 @@ def create_app(
             "workspace_path": str(workspace_path),
             "database_path": str(database_path),
             "graph_name": graph_name,
-            "chat": _llm_status(active_chat_client, chat_configuration_error),
-            "embedding": _embedding_status(active_embedding_client, embedding_configuration_error),
+            "chat": _llm_status(active_chat_client),
+            "embedding": _embedding_status(active_embedding_client),
         }
 
     @app.get("/api/summary")
@@ -158,8 +153,6 @@ def create_app(
         """基于 Summary 向量召回代码图谱种子节点。"""
 
         _ensure_database_exists(database_path)
-        if active_embedding_client is None:
-            raise HTTPException(status_code=503, detail=embedding_configuration_error or "Embedding 未配置")
         if not q.strip():
             raise HTTPException(status_code=400, detail="q 不能为空")
         if limit < 1:
@@ -183,8 +176,6 @@ def create_app(
         """返回 Agent 可消费的结构化代码图谱上下文。"""
 
         _ensure_database_exists(database_path)
-        if active_embedding_client is None:
-            raise HTTPException(status_code=503, detail=embedding_configuration_error or "Embedding 未配置")
         if not q.strip():
             raise HTTPException(status_code=400, detail="q 不能为空")
         if limit < 1:
@@ -209,10 +200,7 @@ def create_app(
     def chat(request: ChatRequest) -> dict[str, object]:
         """调用已配置的 LLM 生成对话回复。"""
 
-        if active_chat_client is None:
-            raise HTTPException(status_code=503, detail=chat_configuration_error or "Chat 模型未配置")
-        if database_artifact_exists(database_path) and active_embedding_client is None:
-            raise HTTPException(status_code=503, detail=embedding_configuration_error or "Embedding 未配置")
+        _ensure_database_exists(database_path)
 
         messages = _to_llm_messages(request.messages)
         if not messages:
@@ -225,7 +213,6 @@ def create_app(
             enriched_messages = _attach_graph_context(
                 messages,
                 graph_reader=graph_reader,
-                database_path=database_path,
                 embedding_client=active_embedding_client,
             )
             reply = active_chat_client.generate_reply(enriched_messages)
@@ -242,13 +229,10 @@ def create_app(
         }
 
     @app.get("/", response_model=None)
-    def index() -> FileResponse | HTMLResponse:
-        """返回已构建前端；未构建时提供最小占位入口。"""
+    def index() -> FileResponse:
+        """返回已构建前端。"""
 
-        if static_index_path.exists():
-            return FileResponse(static_index_path)
-
-        return HTMLResponse(_placeholder_html())
+        return FileResponse(static_index_path)
 
     return app
 
@@ -498,7 +482,7 @@ class RigelGraphReader:
         embedding_model: str,
         limit: int,
         expansion_limit: int,
-        source_reader: RepositorySourceReader | None = None,
+        source_reader: RepositorySourceReader,
     ) -> dict[str, object]:
         """组装 Agent 可直接引用的结构化图谱上下文。"""
 
@@ -582,7 +566,7 @@ class RigelGraphReader:
         rank: int,
         result: dict[str, object],
         *,
-        source_reader: RepositorySourceReader | None,
+        source_reader: RepositorySourceReader,
     ) -> dict[str, object]:
         node = cast(dict[str, object], result["node"])
         node_id = str(node["id"])
@@ -676,10 +660,7 @@ class RigelGraphReader:
 
 
 def _read_graph_name(state_path: Path) -> str:
-    """优先使用索引状态中的图名称。"""
-
-    if not state_path.exists():
-        return DEFAULT_GRAPH_NAME
+    """读取索引状态中的图名称。"""
 
     import json
 
@@ -696,38 +677,24 @@ def _ensure_database_exists(database_path: Path) -> None:
         )
 
 
-def _resolve_chat_client(repository_path: Path, provided_client: RigelLLM | None) -> tuple[RigelLLM | None, str | None]:
+def _resolve_chat_client(repository_path: Path, provided_client: RigelLLM | None) -> RigelLLM:
     if provided_client is not None:
-        # 测试和嵌入场景可以显式传入客户端，避免读取当前仓库的本地配置文件。
-        return provided_client, None
+        return provided_client
 
-    try:
-        return RigelLLM(LLMConfig.from_repository(repository_path, LLMConfigSection.CHAT)), None
-    except LLMConfigurationError as error:
-        return None, str(error)
+    return RigelLLM(LLMConfig.from_repository(repository_path, LLMConfigSection.CHAT))
 
 
 def _resolve_embedding_client(
     repository_path: Path,
     provided_client: RigelEmbedding | None,
-) -> tuple[RigelEmbedding | None, str | None]:
+) -> RigelEmbedding:
     if provided_client is not None:
-        # 测试和嵌入场景可以显式传入客户端，避免读取当前仓库的本地配置文件。
-        return provided_client, None
+        return provided_client
 
-    try:
-        return RigelEmbedding(EmbeddingConfig.from_repository(repository_path)), None
-    except EmbeddingConfigurationError as error:
-        return None, str(error)
+    return RigelEmbedding(EmbeddingConfig.from_repository(repository_path))
 
 
-def _llm_status(llm_client: RigelLLM | None, configuration_error: str | None) -> dict[str, object]:
-    if llm_client is None:
-        return {
-            "configured": False,
-            "error": configuration_error,
-        }
-
+def _llm_status(llm_client: RigelLLM) -> dict[str, object]:
     config = llm_client.config
     return {
         "configured": True,
@@ -737,13 +704,7 @@ def _llm_status(llm_client: RigelLLM | None, configuration_error: str | None) ->
     }
 
 
-def _embedding_status(embedding_client: RigelEmbedding | None, configuration_error: str | None) -> dict[str, object]:
-    if embedding_client is None:
-        return {
-            "configured": False,
-            "error": configuration_error,
-        }
-
+def _embedding_status(embedding_client: RigelEmbedding) -> dict[str, object]:
     config = embedding_client.config
     return {
         "configured": True,
@@ -768,15 +729,8 @@ def _attach_graph_context(
     messages: list[LLMMessage],
     *,
     graph_reader: RigelGraphReader,
-    database_path: Path,
-    embedding_client: RigelEmbedding | None,
+    embedding_client: RigelEmbedding,
 ) -> list[LLMMessage]:
-    if not database_artifact_exists(database_path):
-        # 未初始化仓库仍允许纯 LLM 对话，避免 Web 页面因为缺少图数据库完全不可用。
-        return messages
-    if embedding_client is None:
-        return messages
-
     context = _build_graph_context(messages[-1].content, graph_reader=graph_reader, embedding_client=embedding_client)
     if not context:
         return messages
@@ -899,11 +853,8 @@ def _format_source_file(file_node: Mapping[str, object]) -> dict[str, object]:
 def _source_slices_for_anchors(
     anchors: list[dict[str, object]],
     *,
-    source_reader: RepositorySourceReader | None,
+    source_reader: RepositorySourceReader,
 ) -> list[dict[str, object]]:
-    if source_reader is None:
-        return []
-
     source_slices: list[dict[str, object]] = []
     for anchor in anchors[:DEFAULT_CONTEXT_SOURCE_SLICE_LIMIT]:
         source_file = anchor.get("source_file")
@@ -970,30 +921,3 @@ def _node_label(node_id: str, properties: Mapping[str, object]) -> str:
         if isinstance(value, str) and value:
             return value
     return node_id
-
-
-def _placeholder_html() -> str:
-    return """
-    <!doctype html>
-    <html lang="zh-CN">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Rigel Demo</title>
-        <style>
-          body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 3rem; line-height: 1.6; }
-          code { background: #f4f4f5; padding: 0.15rem 0.35rem; border-radius: 0.25rem; }
-          a { color: #2563eb; }
-        </style>
-      </head>
-      <body>
-        <h1>Rigel Web Demo</h1>
-        <p>前端暂未实现，后端 API 已启动。</p>
-        <ul>
-          <li><a href="/api/health"><code>/api/health</code></a></li>
-          <li><a href="/api/summary"><code>/api/summary</code></a></li>
-          <li><a href="/api/graph"><code>/api/graph</code></a></li>
-        </ul>
-      </body>
-    </html>
-    """

@@ -85,14 +85,14 @@ class RigelEmbedding:
         except OpenAIError as error:
             raise EmbeddingRequestError(f"Embedding 调用失败：{error}") from error
 
-        response_data = list(getattr(response, "data", []))
+        response_data = list(response.data)
         if len(response_data) != len(texts):
             raise EmbeddingResponseError("Embedding 返回数量与输入数量不一致")
 
-        response_data.sort(key=lambda item: int(getattr(item, "index", 0)))
+        response_data.sort(key=lambda item: int(item.index))
         embeddings: list[list[float]] = []
         for item in response_data:
-            raw_embedding = getattr(item, "embedding", None)
+            raw_embedding = item.embedding
             if not isinstance(raw_embedding, list):
                 raise EmbeddingResponseError("Embedding 返回向量格式不正确")
             embedding = _normalize_embedding(raw_embedding)

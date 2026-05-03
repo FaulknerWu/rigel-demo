@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -7,33 +8,62 @@ from unittest import TestCase
 from fastapi.testclient import TestClient
 
 from rigel_demo.core import Anchor, EdgeType, Entity, File, GraphEdge, GraphIR, Module, Repository
-from rigel_demo.embedding import EmbeddingConfig, EmbeddingFormat
+from rigel_demo.embedding import EmbeddingConfig, EmbeddingConfigurationError, EmbeddingFormat
 from rigel_demo.indexing.retrieval_summaries import attach_retrieval_summaries
-from rigel_demo.llm import LLMConfig, LLMConfigSection, LLMMessage
+from rigel_demo.llm import (
+    DEFAULT_CHAT_SYSTEM_PROMPT,
+    DEFAULT_SUMMARY_SYSTEM_PROMPT,
+    LLMConfig,
+    LLMConfigSection,
+    LLMConfigurationError,
+    LLMMessage,
+)
 from rigel_demo.storage import FalkorDBConfig, FalkorDBStore
 from rigel_demo.web.app import create_app
 
 
 class WebAppLLMTest(TestCase):
-    def test_chat_returns_configuration_error_when_llm_is_missing(self) -> None:
+    def test_create_app_requires_chat_config_at_startup(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
-            client = TestClient(create_app(Path(workspace)))
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding, write_config=False)
 
-            response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "你好"}]})
+            with self.assertRaisesRegex(LLMConfigurationError, ".rigel/config.json"):
+                create_app(repository_path, embedding_client=fake_embedding)
 
-        self.assertEqual(response.status_code, 503)
-        self.assertIn(".rigel/config.json", response.json()["detail"])
+    def test_create_app_requires_embedding_config_at_startup(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, _FakeEmbeddingClient(), write_config=False)
+            repository_path.joinpath(".rigel", "config.json").write_text(
+                json.dumps(
+                    {
+                        "chat": _demo_llm_config(DEFAULT_CHAT_SYSTEM_PROMPT),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(EmbeddingConfigurationError, "embedding"):
+                create_app(repository_path, chat_client=_FakeRigelLLM())
 
     def test_chat_uses_injected_llm_client(self) -> None:
         fake_llm = _FakeRigelLLM()
+        fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
-            client = TestClient(create_app(Path(workspace), chat_client=fake_llm))
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, chat_client=fake_llm, embedding_client=fake_embedding))
 
-            response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "你好"}]})
+            response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "PaymentService 做什么"}]})
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["message"], {"role": "assistant", "content": "测试回复"})
-        self.assertEqual(fake_llm.messages, [LLMMessage(role="user", content="你好")])
+        self.assertIn("代码图谱搜索上下文", fake_llm.messages[0].content)
+        self.assertIn("PaymentService 做什么", fake_llm.messages[0].content)
 
     def test_recall_returns_summary_seed_and_related_context(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
@@ -196,10 +226,22 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(fake_llm.messages[0], LLMMessage(role="user", content="NoMatch"))
 
 
-def _write_demo_graph(repository_path: Path, embedding_client: "_FakeEmbeddingClient") -> Path:
+def _write_demo_graph(
+    repository_path: Path,
+    embedding_client: "_FakeEmbeddingClient",
+    *,
+    write_config: bool = True,
+) -> Path:
     workspace_path = repository_path / ".rigel"
     database_path = workspace_path / "falkordb.db"
+    static_path = workspace_path / "web" / "static"
     source_path = repository_path / "src" / "main" / "java" / "demo" / "PaymentService.java"
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    static_path.joinpath("assets").mkdir(parents=True, exist_ok=True)
+    static_path.joinpath("index.html").write_text("<!doctype html><div id=\"root\"></div>\n", encoding="utf-8")
+    workspace_path.joinpath("rigel.json").write_text('{"graph_name": "rigel"}\n', encoding="utf-8")
+    if write_config:
+        workspace_path.joinpath("config.json").write_text(_demo_config_json(), encoding="utf-8")
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_text(
         "\n".join(
@@ -277,6 +319,44 @@ def _write_demo_graph(repository_path: Path, embedding_client: "_FakeEmbeddingCl
     attach_retrieval_summaries(graph, embedding_client=embedding_client, summary_client=_FakeSummaryClient())
     FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))).upsert_graph(graph)
     return database_path
+
+
+def _demo_config_json() -> str:
+    return json.dumps(
+        {
+            "chat": _demo_llm_config(DEFAULT_CHAT_SYSTEM_PROMPT),
+            "summary": {
+                **_demo_llm_config(DEFAULT_SUMMARY_SYSTEM_PROMPT),
+                "temperature": 0,
+                "max_output_tokens": 300,
+            },
+            "embedding": {
+                "provider": "openai",
+                "format": "openai_embeddings",
+                "model": "text-embedding-3-small",
+                "api_key": "fake-embedding-key",
+                "base_url": None,
+                "dimensions": 3,
+                "timeout_seconds": 60,
+                "batch_size": 8,
+            },
+        },
+        ensure_ascii=False,
+        indent=2,
+    ) + "\n"
+
+
+def _demo_llm_config(system_prompt: str) -> dict[str, object]:
+    return {
+        "provider": "openai",
+        "model": "gpt-5.2",
+        "api_key": "fake-key",
+        "base_url": None,
+        "timeout_seconds": 60,
+        "temperature": None,
+        "max_output_tokens": None,
+        "system_prompt": system_prompt,
+    }
 
 
 class _FakeRigelLLM:

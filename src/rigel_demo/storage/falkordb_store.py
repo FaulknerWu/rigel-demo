@@ -129,25 +129,20 @@ class FalkorDBStore:
         if self._summary_vector_index_exists(dimensions=dimensions):
             return
 
-        try:
-            self._graph.query(
-                f"""
-                CREATE VECTOR INDEX FOR (summary:{SUMMARY_NODE_LABEL})
-                ON (summary.{SUMMARY_EMBEDDING_PROPERTY})
-                OPTIONS {{
-                    dimension: $dimensions,
-                    similarityFunction: $similarity_function
-                }}
-                """,
-                {
-                    "dimensions": dimensions,
-                    "similarity_function": SUMMARY_VECTOR_SIMILARITY_FUNCTION,
-                },
-            )
-        except Exception as error:
-            if "already indexed" in str(error):
-                return
-            raise
+        self._graph.query(
+            f"""
+            CREATE VECTOR INDEX FOR (summary:{SUMMARY_NODE_LABEL})
+            ON (summary.{SUMMARY_EMBEDDING_PROPERTY})
+            OPTIONS {{
+                dimension: $dimensions,
+                similarityFunction: $similarity_function
+            }}
+            """,
+            {
+                "dimensions": dimensions,
+                "similarity_function": SUMMARY_VECTOR_SIMILARITY_FUNCTION,
+            },
+        )
 
     def _summary_vector_index_exists(self, *, dimensions: int) -> bool:
         rows = self._graph.query("CALL db.indexes()").result_set

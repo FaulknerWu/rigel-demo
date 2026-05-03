@@ -65,15 +65,16 @@ OpenAI-compatible Chat Completions API。`provider` 是提供商名称，两个�
     "model": "gpt-5.2",
     "api_key": "sk-your-openai-key",
     "base_url": null,
+    "timeout_seconds": 60,
     "temperature": 0,
     "max_output_tokens": null,
-    "system_prompt": null
+    "system_prompt": "你是 Rigel 的代码图谱分析助手。回答时优先基于用户给出的代码图谱、仓库上下文与当前问题，无法从上下文确认的内容要明确说明不确定。"
   }
 }
 ```
 
 新增 OpenAI-compatible 提供商时设置新的 `chat.provider` 或 `summary.provider` 名称，
-并通过对应功能段的 `api_key` 与 `base_url` 配置访问参数。可选生成参数包括
+并通过对应功能段的 `api_key` 与 `base_url` 配置访问参数。生成参数包括
 `timeout_seconds`、`temperature`、`max_output_tokens` 与 `system_prompt`，其中
 `max_output_tokens` 会映射到 Chat Completions 的 `max_completion_tokens`。
 

@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
+from rigel_demo.llm.config import DEFAULT_CHAT_SYSTEM_PROMPT, DEFAULT_SUMMARY_SYSTEM_PROMPT
+
 
 RIGEL_WORKSPACE_DIRECTORY_NAME = ".rigel"
 RIGEL_CONFIG_FILE_NAME = "config.json"
@@ -34,7 +36,7 @@ DEFAULT_CONFIG_DOCUMENT = {
         "timeout_seconds": 60,
         "temperature": None,
         "max_output_tokens": None,
-        "system_prompt": None,
+        "system_prompt": DEFAULT_CHAT_SYSTEM_PROMPT,
     },
     "summary": {
         "provider": "openai",
@@ -44,7 +46,7 @@ DEFAULT_CONFIG_DOCUMENT = {
         "timeout_seconds": 60,
         "temperature": 0,
         "max_output_tokens": 300,
-        "system_prompt": None,
+        "system_prompt": DEFAULT_SUMMARY_SYSTEM_PROMPT,
     },
     "embedding": {
         "provider": "openai",

@@ -125,6 +125,9 @@ class CliWebConfigTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             static_path = repository_path / ".rigel" / "web" / "static"
+            static_path.joinpath("assets").mkdir(parents=True, exist_ok=True)
+            static_path.joinpath("index.html").write_text("<!doctype html><div id=\"root\"></div>\n", encoding="utf-8")
+            repository_path.joinpath(".rigel", "rigel.json").write_text('{"graph_name": "rigel"}\n', encoding="utf-8")
             _write_config(
                 repository_path,
                 {

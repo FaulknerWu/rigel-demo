@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest import TestCase
 
 from rigel_demo.llm import (
+    DEFAULT_CHAT_SYSTEM_PROMPT,
+    DEFAULT_SUMMARY_SYSTEM_PROMPT,
     LLMConfig,
     LLMConfigSection,
     LLMConfigurationError,
@@ -24,6 +26,11 @@ class LLMConfigTest(TestCase):
                     "provider": "openai",
                     "model": "gpt-5.2",
                     "api_key": "openai-key",
+                    "base_url": None,
+                    "timeout_seconds": 60,
+                    "temperature": None,
+                    "max_output_tokens": None,
+                    "system_prompt": DEFAULT_CHAT_SYSTEM_PROMPT,
                 },
             )
 
@@ -34,6 +41,8 @@ class LLMConfigTest(TestCase):
         self.assertEqual(config.model, "gpt-5.2")
         self.assertEqual(config.api_key, "openai-key")
         self.assertIsNone(config.base_url)
+        self.assertEqual(config.timeout_seconds, 60)
+        self.assertEqual(config.system_prompt, DEFAULT_CHAT_SYSTEM_PROMPT)
 
     def test_summary_section_reads_independent_model(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -47,12 +56,21 @@ class LLMConfigTest(TestCase):
                             "provider": "openai",
                             "model": "gpt-5.2",
                             "api_key": "chat-key",
+                            "base_url": None,
+                            "timeout_seconds": 60,
+                            "temperature": None,
+                            "max_output_tokens": None,
+                            "system_prompt": DEFAULT_CHAT_SYSTEM_PROMPT,
                         },
                         "summary": {
                             "provider": "openai",
                             "model": "gpt-5.2-mini",
                             "api_key": "summary-key",
+                            "base_url": None,
+                            "timeout_seconds": 60,
+                            "temperature": 0,
                             "max_output_tokens": 256,
+                            "system_prompt": DEFAULT_SUMMARY_SYSTEM_PROMPT,
                         },
                     },
                     ensure_ascii=False,
@@ -78,7 +96,10 @@ class LLMConfigTest(TestCase):
                     "model": "gpt-custom",
                     "api_key": "openai-key",
                     "base_url": "https://example.test/v1",
+                    "timeout_seconds": 60,
+                    "temperature": None,
                     "max_output_tokens": 1024,
+                    "system_prompt": DEFAULT_CHAT_SYSTEM_PROMPT,
                 },
             )
 
@@ -96,6 +117,11 @@ class LLMConfigTest(TestCase):
                     "provider": "acme",
                     "model": "acme-chat",
                     "api_key": "acme-key",
+                    "base_url": None,
+                    "timeout_seconds": 60,
+                    "temperature": None,
+                    "max_output_tokens": None,
+                    "system_prompt": DEFAULT_CHAT_SYSTEM_PROMPT,
                 },
             )
 
@@ -111,6 +137,10 @@ class LLMConfigTest(TestCase):
                     "model": "acme-chat",
                     "api_key": "acme-key",
                     "base_url": "https://acme.example/v1",
+                    "timeout_seconds": 60,
+                    "temperature": None,
+                    "max_output_tokens": None,
+                    "system_prompt": DEFAULT_CHAT_SYSTEM_PROMPT,
                 },
             )
 
@@ -122,9 +152,38 @@ class LLMConfigTest(TestCase):
 
     def test_missing_model_fails_fast(self) -> None:
         with TemporaryDirectory() as workspace:
-            repository_path = _write_llm_config(Path(workspace), {"api_key": "test-key"})
+            repository_path = _write_llm_config(
+                Path(workspace),
+                {
+                    "provider": "openai",
+                    "api_key": "test-key",
+                    "base_url": None,
+                    "timeout_seconds": 60,
+                    "temperature": None,
+                    "max_output_tokens": None,
+                    "system_prompt": DEFAULT_CHAT_SYSTEM_PROMPT,
+                },
+            )
 
             with self.assertRaisesRegex(LLMConfigurationError, "chat.model"):
+                LLMConfig.from_repository(repository_path)
+
+    def test_missing_template_field_fails_fast(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = _write_llm_config(
+                Path(workspace),
+                {
+                    "provider": "openai",
+                    "model": "gpt-5.2",
+                    "api_key": "test-key",
+                    "base_url": None,
+                    "temperature": None,
+                    "max_output_tokens": None,
+                    "system_prompt": DEFAULT_CHAT_SYSTEM_PROMPT,
+                },
+            )
+
+            with self.assertRaisesRegex(LLMConfigurationError, "chat.timeout_seconds"):
                 LLMConfig.from_repository(repository_path)
 
     def test_missing_config_file_fails_fast(self) -> None:

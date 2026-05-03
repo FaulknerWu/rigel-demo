@@ -18,11 +18,17 @@ SUMMARY_SOURCE_HASH_PREFIX = "sha256:"
 _SUMMARY_TARGET_TYPES = {NodeType.MODULE, NodeType.FILE, NodeType.ENTITY}
 
 
+class SummaryClientConfig(Protocol):
+    """Summary 依赖的模型配置契约。"""
+
+    model: str
+
+
 class SummaryEmbeddingClient(Protocol):
     """Summary 生成依赖的 Embedding 客户端接口。"""
 
     @property
-    def config(self) -> object: ...
+    def config(self) -> SummaryClientConfig: ...
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
 
@@ -31,7 +37,7 @@ class SummaryTextClient(Protocol):
     """Summary 文本生成依赖的 LLM 客户端接口。"""
 
     @property
-    def config(self) -> object: ...
+    def config(self) -> SummaryClientConfig: ...
 
     def generate_reply(self, messages: Sequence[LLMMessage]) -> str: ...
 
@@ -59,8 +65,8 @@ def attach_retrieval_summaries(
     if len(embeddings) != len(target_nodes):
         raise ValueError("Embedding 返回数量与 Summary 目标数量不一致")
 
-    embedding_model = str(getattr(embedding_client.config, "model"))
-    summary_model = str(getattr(summary_client.config, "model"))
+    embedding_model = embedding_client.config.model
+    summary_model = summary_client.config.model
     for target_node, summary_text, embedding in zip(target_nodes, summary_texts, embeddings, strict=True):
         summary = build_retrieval_summary(
             target_node,
