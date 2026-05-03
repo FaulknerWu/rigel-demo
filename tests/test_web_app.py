@@ -51,6 +51,25 @@ class WebAppLLMTest(TestCase):
         self.assertIn("PaymentService", result["summary"]["text"])
         self.assertEqual(result["related"][0]["edge"]["type"], "CONTAINS")
 
+    def test_recall_uses_falkordb_vector_index(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            database_path = _write_demo_graph(repository_path, fake_embedding)
+            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
+
+            indexes = store.graph.query("CALL db.indexes()").result_set
+            vector_rows = store.graph.query(
+                "CALL db.idx.vector.queryNodes('Summary', 'embedding', 3, vecf32([1.0, 0.0, 0.0])) "
+                "YIELD node, score RETURN node.id, score"
+            ).result_set
+
+        summary_index = next(index for index in indexes if index[0] == "Summary")
+        self.assertEqual(summary_index[2]["embedding"], ["VECTOR"])
+        self.assertEqual(summary_index[3]["embedding"]["dimension"], 3)
+        self.assertEqual(summary_index[3]["embedding"]["similarityFunction"], "cosine")
+        self.assertTrue(any(row[0].startswith("summary:") for row in vector_rows))
+
     def test_context_returns_structured_seed_anchors_and_source_file(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
@@ -76,6 +95,20 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(seed["source_slices"][0]["relative_path"], "src/main/java/demo/PaymentService.java")
         self.assertEqual(seed["source_slices"][0]["start_line"], 3)
         self.assertIn("class PaymentService", seed["source_slices"][0]["content"])
+
+    def test_context_keeps_vector_strategy_without_keyword_fallback(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
+
+            response = client.get("/api/context", params={"q": "NoMatch", "limit": "3"})
+
+        self.assertEqual(response.status_code, 200)
+        context = response.json()["context"]
+        self.assertEqual(context["strategy"], "vector_recall")
+        self.assertEqual(context["seeds"], [])
 
     def test_node_anchors_returns_source_file_and_anchor_coordinates(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
@@ -149,8 +182,21 @@ class WebAppLLMTest(TestCase):
         self.assertIn("向量分数", fake_llm.messages[0].content)
         self.assertIn("PaymentService", fake_llm.messages[0].content)
 
+    def test_chat_does_not_attach_keyword_context_when_vector_recall_is_empty(self) -> None:
+        fake_llm = _FakeRigelLLM()
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, chat_client=fake_llm, embedding_client=fake_embedding))
 
-def _write_demo_graph(repository_path: Path, embedding_client: "_FakeEmbeddingClient") -> None:
+            response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "NoMatch"}]})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(fake_llm.messages[0], LLMMessage(role="user", content="NoMatch"))
+
+
+def _write_demo_graph(repository_path: Path, embedding_client: "_FakeEmbeddingClient") -> Path:
     workspace_path = repository_path / ".rigel"
     database_path = workspace_path / "falkordb.db"
     source_path = repository_path / "src" / "main" / "java" / "demo" / "PaymentService.java"
@@ -230,6 +276,7 @@ def _write_demo_graph(repository_path: Path, embedding_client: "_FakeEmbeddingCl
     graph.add_edge(GraphEdge.create(EdgeType.HAS_ANCHOR, entity.entity_id, body_anchor.anchor_id, role="body"))
     attach_retrieval_summaries(graph, embedding_client=embedding_client, summary_client=_FakeSummaryClient())
     FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))).upsert_graph(graph)
+    return database_path
 
 
 class _FakeRigelLLM:

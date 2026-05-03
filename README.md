@@ -144,11 +144,11 @@ RETURN entity.qualified_name, target.qualified_name
 Web 后端提供 `/api/recall?q=PaymentService`，流程为：
 
 1. 将用户问题映射到同一套本地向量空间。
-2. 读取 `Summary` 节点并按余弦相似度排序，得到召回种子。
+2. 通过 FalkorDB 原生向量索引查询 `Summary.embedding`，得到召回种子。
 3. 通过 `DESCRIBES` 锁定目标 Module、File 或 Entity。
 4. 沿 `CONTAINS`、`DEPENDS_ON`、`SPECIALIZES`、`ALIASES` 补充一跳上下文。
 
-`/api/chat` 会优先使用这条向量召回链路组装代码图谱上下文；召回为空时才回退到字段关键词搜索。
+`/api/chat` 使用这条向量召回链路组装代码图谱上下文；召回为空时不再追加关键词搜索上下文。
 
 Rigel 主仓库正式的架构决策与主线规划见：
 - GitHub: <https://github.com/FaulknerWu/Rigel>

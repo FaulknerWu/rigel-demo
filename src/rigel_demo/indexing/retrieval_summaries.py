@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from rigel_demo.core.graph_ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType, Summary
@@ -108,21 +107,6 @@ def build_retrieval_summary(
         embedding_dimensions=len(embedding),
         embedding=embedding,
     )
-
-
-def cosine_similarity(left: Iterable[float], right: Iterable[float]) -> float:
-    """计算两个向量的余弦相似度。"""
-
-    left_values = list(left)
-    right_values = list(right)
-    if not left_values or not right_values or len(left_values) != len(right_values):
-        return 0.0
-
-    left_norm = math.sqrt(sum(value * value for value in left_values))
-    right_norm = math.sqrt(sum(value * value for value in right_values))
-    if left_norm == 0 or right_norm == 0:
-        return 0.0
-    return sum(left * right for left, right in zip(left_values, right_values, strict=True)) / (left_norm * right_norm)
 
 
 def _generate_summary_text(target_node: GraphNode, *, summary_client: SummaryTextClient | RigelLLM) -> str:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -29,7 +28,6 @@ from rigel_demo.embedding import (
 )
 from rigel_demo.indexing.retrieval_summaries import (
     RETRIEVAL_SUMMARY_PURPOSE,
-    cosine_similarity,
 )
 from rigel_demo.llm import (
     LLMConfig,
@@ -43,9 +41,7 @@ from rigel_demo.llm import (
 from rigel_demo.storage.falkordb_store import FalkorDBConfig, FalkorDBStore
 
 DEFAULT_GRAPH_LIMIT = 500
-DEFAULT_SEARCH_LIMIT = 50
 DEFAULT_RECALL_LIMIT = 8
-DEFAULT_RECALL_SCAN_LIMIT = 2_000
 DEFAULT_RECALL_EXPANSION_LIMIT = 3
 DEFAULT_CHAT_CONTEXT_LIMIT = 8
 DEFAULT_SOURCE_SLICE_MAX_LINES = 120
@@ -111,17 +107,6 @@ def create_app(
         if limit < 1:
             raise HTTPException(status_code=400, detail="limit 必须大于 0")
         return {"status": "success", "graph": graph_reader.graph(limit=limit)}
-
-    @app.get("/api/search")
-    def search(q: str, limit: int = DEFAULT_SEARCH_LIMIT) -> dict[str, object]:
-        """按节点名称、路径或限定名搜索演示图谱。"""
-
-        _ensure_database_exists(database_path)
-        if not q.strip():
-            raise HTTPException(status_code=400, detail="q 不能为空")
-        if limit < 1:
-            raise HTTPException(status_code=400, detail="limit 必须大于 0")
-        return {"status": "success", "nodes": graph_reader.search(q.strip(), limit=limit)}
 
     @app.get("/api/nodes/{node_id:path}/anchors")
     def node_anchors(node_id: str) -> dict[str, object]:
@@ -451,28 +436,6 @@ class RigelGraphReader:
         edges = [_format_edge(source_id, target_id, edge_type, properties) for source_id, target_id, edge_type, properties in edge_rows]
         return {"nodes": nodes, "edges": edges}
 
-    def search(self, query: str, *, limit: int) -> list[dict[str, object]]:
-        """在常见展示字段中做大小写不敏感搜索。"""
-
-        normalized_query = query.lower()
-        rows = self._query(
-            """
-            MATCH (node:RigelNode)
-            WHERE node.rigel_type IN $visible_node_types
-              AND (
-                toLower(coalesce(node.display_name, '')) CONTAINS $query
-                OR toLower(coalesce(node.qualified_name, '')) CONTAINS $query
-                OR toLower(coalesce(node.relative_path, '')) CONTAINS $query
-                OR toLower(coalesce(node.name, '')) CONTAINS $query
-                OR toLower(coalesce(node.id, '')) CONTAINS $query
-              )
-            RETURN node.id, properties(node)
-            LIMIT $limit
-            """,
-            {"visible_node_types": list(VISIBLE_NODE_TYPES), "query": normalized_query, "limit": limit},
-        )
-        return [_format_node(node_id, properties) for node_id, properties in rows]
-
     def recall(
         self,
         query_embedding: list[float],
@@ -485,26 +448,28 @@ class RigelGraphReader:
 
         rows = self._query(
             """
-            MATCH (summary:RigelNode:Summary)-[:DESCRIBES]->(target:RigelNode)
+            CALL db.idx.vector.queryNodes('Summary', 'embedding', $vector_limit, vecf32($query_embedding))
+            YIELD node AS summary, score AS distance
+            MATCH (summary)-[:DESCRIBES]->(target:RigelNode)
             WHERE summary.purpose = $purpose
               AND summary.embedding_model = $embedding_model
               AND summary.embedding_dimensions = $embedding_dimensions
               AND target.rigel_type IN $visible_node_types
-            RETURN summary.id, properties(summary), target.id, properties(target)
-            LIMIT $scan_limit
+            RETURN summary.id, properties(summary), target.id, properties(target), distance
+            ORDER BY distance ASC
             """,
             {
                 "purpose": RETRIEVAL_SUMMARY_PURPOSE,
                 "embedding_model": embedding_model,
                 "embedding_dimensions": len(query_embedding),
                 "visible_node_types": list(VISIBLE_NODE_TYPES),
-                "scan_limit": DEFAULT_RECALL_SCAN_LIMIT,
+                "query_embedding": query_embedding,
+                "vector_limit": limit,
             },
         )
         scored_results: list[dict[str, object]] = []
-        for summary_id, summary_properties, target_id, target_properties in rows:
-            embedding = _read_embedding(cast(Mapping[str, object], summary_properties))
-            score = cosine_similarity(query_embedding, embedding)
+        for summary_id, summary_properties, target_id, target_properties, distance in rows:
+            score = _cosine_distance_to_similarity(distance)
             if score <= 0:
                 continue
             node = _format_node(target_id, target_properties)
@@ -543,23 +508,12 @@ class RigelGraphReader:
             limit=limit,
             expansion_limit=expansion_limit,
         )
-        if recall_results:
-            return {
-                "query": query,
-                "strategy": "vector_recall",
-                "seeds": [
-                    self._context_seed_from_recall_result(index, result, source_reader=source_reader)
-                    for index, result in enumerate(recall_results, start=1)
-                ],
-            }
-
-        fallback_nodes = self.search(query, limit=limit)
         return {
             "query": query,
-            "strategy": "keyword_fallback" if fallback_nodes else "empty",
+            "strategy": "vector_recall",
             "seeds": [
-                self._context_seed_from_node(index, node, source_reader=source_reader)
-                for index, node in enumerate(fallback_nodes, start=1)
+                self._context_seed_from_recall_result(index, result, source_reader=source_reader)
+                for index, result in enumerate(recall_results, start=1)
             ],
         }
 
@@ -640,27 +594,6 @@ class RigelGraphReader:
             "summary": result["summary"],
             "node": node,
             "related": result["related"],
-            "source_file": source_file,
-            "anchors": anchors,
-            "source_slices": _source_slices_for_anchors(anchors, source_reader=source_reader),
-        }
-
-    def _context_seed_from_node(
-        self,
-        rank: int,
-        node: dict[str, object],
-        *,
-        source_reader: RepositorySourceReader | None,
-    ) -> dict[str, object]:
-        node_id = str(node["id"])
-        source_file = self._source_file_for_node(node_id)
-        anchors = self._anchors_for_node(node_id, source_file=source_file)
-        return {
-            "rank": rank,
-            "score": None,
-            "summary": None,
-            "node": node,
-            "related": self._related_nodes(node_id, limit=DEFAULT_RECALL_EXPANSION_LIMIT),
             "source_file": source_file,
             "anchors": anchors,
             "source_slices": _source_slices_for_anchors(anchors, source_reader=source_reader),
@@ -869,22 +802,7 @@ def _build_graph_context(
         limit=DEFAULT_CHAT_CONTEXT_LIMIT,
         expansion_limit=DEFAULT_RECALL_EXPANSION_LIMIT,
     )
-    if recall_results:
-        return _format_recall_context(recall_results)
-
-    fallback_nodes = graph_reader.search(query, limit=DEFAULT_CHAT_CONTEXT_LIMIT)
-    if not fallback_nodes:
-        return ""
-
-    lines: list[str] = []
-    for index, node in enumerate(fallback_nodes, start=1):
-        properties = cast(Mapping[str, object], node["properties"])
-        relative_path = _read_property(properties, "relative_path")
-        qualified_name = _read_property(properties, "qualified_name")
-        location = " / ".join(value for value in (qualified_name, relative_path) if value)
-        suffix = f"：{location}" if location else ""
-        lines.append(f"{index}. {node['label']}（{node['type']}，关键词回退）{suffix}")
-    return "\n".join(lines)
+    return _format_recall_context(recall_results)
 
 
 def _format_recall_context(recall_results: list[dict[str, object]]) -> str:
@@ -1040,22 +958,10 @@ def _read_int_property(properties: Mapping[str, object], name: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
-def _read_embedding(properties: Mapping[str, object]) -> list[float]:
-    value = properties.get("embedding")
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return []
-    if not isinstance(value, list):
-        return []
-
-    embedding: list[float] = []
-    for item in value:
-        if isinstance(item, bool) or not isinstance(item, int | float):
-            return []
-        embedding.append(float(item))
-    return embedding
+def _cosine_distance_to_similarity(distance: object) -> float:
+    if isinstance(distance, bool) or not isinstance(distance, int | float):
+        return 0.0
+    return max(0.0, 1.0 - float(distance))
 
 
 def _node_label(node_id: str, properties: Mapping[str, object]) -> str:

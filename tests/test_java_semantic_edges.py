@@ -62,27 +62,35 @@ class JavaSemanticEdgesTest(TestCase):
         self.assertEqual(reference_edges[0].properties["provenance"], "lsp")
 
     def test_generated_duplicate_entities_create_alias_edges(self) -> None:
-        production_source = "package demo;\npublic class PaymentService {}\n"
-        generated_source = "package demo;\npublic class PaymentService {}\n"
-        graph = parse_java_file(
-            production_source,
-            "src/main/java/demo/PaymentService.java",
-            request=JavaParseRequest(repository_name="demo"),
-        )
-        _merge_graph(
-            graph,
-            parse_java_file(
-                generated_source,
-                "target/generated-sources/demo/PaymentService.java",
-                request=JavaParseRequest(repository_name="demo", file_zone=GENERATED_ZONE),
-            ),
-        )
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            production_path = repository_path / "src" / "main" / "java" / "demo" / "PaymentService.java"
+            generated_path = repository_path / "target" / "generated-sources" / "demo" / "PaymentService.java"
+            production_source = "package demo;\npublic class PaymentService {}\n"
+            generated_source = "package demo;\npublic class PaymentService {}\n"
+            production_path.parent.mkdir(parents=True)
+            generated_path.parent.mkdir(parents=True)
+            production_path.write_text(production_source, encoding="utf-8")
+            generated_path.write_text(generated_source, encoding="utf-8")
+            graph = parse_java_file(
+                production_source,
+                "src/main/java/demo/PaymentService.java",
+                request=JavaParseRequest(repository_name="demo"),
+            )
+            _merge_graph(
+                graph,
+                parse_java_file(
+                    generated_source,
+                    "target/generated-sources/demo/PaymentService.java",
+                    request=JavaParseRequest(repository_name="demo", file_zone=GENERATED_ZONE),
+                ),
+            )
 
-        enrich_java_semantic_edges(
-            graph,
-            request=JavaSemanticEdgeRequest(repository_root_path="."),
-            lsp_client=_FakeLspClient(),
-        )
+            enrich_java_semantic_edges(
+                graph,
+                request=JavaSemanticEdgeRequest(repository_root_path=str(repository_path)),
+                lsp_client=_FakeLspClient(),
+            )
 
         alias_edges = [edge for edge in graph.edges if edge.type == EdgeType.ALIASES]
         self.assertEqual(len(alias_edges), 1)
@@ -139,9 +147,6 @@ class _FakeLspClient:
     def request_references(self, file_path: str, line: int, column: int) -> list[dict[str, object]]:
         self.reference_requests.append((file_path, line, column))
         return [self.reference_location] if self.reference_location is not None else []
-
-    def request_hover(self, relative_file_path: str, line: int, column: int) -> dict[str, object] | None:
-        return None
 
 
 def _merge_graph(target, source) -> None:

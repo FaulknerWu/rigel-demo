@@ -34,11 +34,6 @@ export interface ApiSummaryResponse {
   summary: ApiSummary;
 }
 
-export interface ApiSearchResponse {
-  status: string;
-  nodes: ApiNode[];
-}
-
 export interface ApiRecallResult {
   score: number;
   summary: {
@@ -128,7 +123,6 @@ const NODE_TYPE_COLORS = [
 ];
 
 const GRAPH_LIMIT = 500;
-const SEARCH_LIMIT = 8;
 
 export async function fetchGraph(): Promise<GraphData> {
   const response = await fetch(`/api/graph?limit=${GRAPH_LIMIT}`);
@@ -140,20 +134,6 @@ export async function fetchSummary(): Promise<GraphSummary> {
   const response = await fetch('/api/summary');
   const payload = await readJson<ApiSummaryResponse>(response);
   return adaptSummary(payload.summary);
-}
-
-export async function searchNodes(query: string): Promise<GraphNode[]> {
-  const params = new URLSearchParams({ q: query, limit: String(SEARCH_LIMIT) });
-  const response = await fetch(`/api/search?${params.toString()}`);
-  const payload = await readJson<ApiSearchResponse>(response);
-  return payload.nodes.map(adaptNode);
-}
-
-export async function recallNodes(query: string): Promise<RecallResult[]> {
-  const params = new URLSearchParams({ q: query, limit: String(SEARCH_LIMIT) });
-  const response = await fetch(`/api/recall?${params.toString()}`);
-  const payload = await readJson<ApiRecallResponse>(response);
-  return payload.results.map(adaptRecallResult);
 }
 
 export async function sendChatMessage(messages: ChatMessage[]): Promise<ChatMessage> {

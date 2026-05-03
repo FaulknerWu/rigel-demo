@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from rigel_demo.core.graph_ir import EdgeType, GraphIR, GraphNode, JsonObject, NodeType
-from rigel_demo.java.source_utils import normalize_path, simple_name
+from rigel_demo.java.source_utils import normalize_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,15 +40,11 @@ class GraphIndex:
         self.entities = self._index_entities(graph)
         self.entities_by_file_path = self._group_entities_by_file_path()
         self.entities_by_qualified_name = self._group_entities_by_property("qualified_name")
-        self.entities_by_display_name = self._group_entities_by_property("display_name")
         self.owner_intervals_by_file = self._index_owner_intervals()
 
-    def find_unique_entity_by_names(self, names: tuple[str, ...]) -> EntityView | None:
-        for name in names:
-            entities = self.entities_by_qualified_name.get(name) or self.entities_by_display_name.get(simple_name(name), [])
-            if len(entities) == 1:
-                return entities[0]
-        return None
+    def find_unique_entity_by_qualified_name(self, qualified_name: str) -> EntityView | None:
+        entities = self.entities_by_qualified_name.get(qualified_name, [])
+        return entities[0] if len(entities) == 1 else None
 
     def find_location_target(self, location: JsonObject) -> EntityView | None:
         file_path, line, column = location_position(location)
