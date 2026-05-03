@@ -12,6 +12,7 @@ from rigel_demo.java.source_utils import normalize_path, simple_name
 class EntityView:
     node: GraphNode
     file_path: str
+    name_anchor: GraphNode | None
     definition_anchor: GraphNode
     body_anchor: GraphNode | None
 
@@ -106,6 +107,7 @@ class GraphIndex:
                 EntityView(
                     node=node,
                     file_path=self.file_path_by_file_id[file_id],
+                    name_anchor=self.anchors_by_owner_and_role.get((node.id, "name")),
                     definition_anchor=self.anchors_by_owner_and_role[(node.id, "definition")],
                     body_anchor=self.anchors_by_owner_and_role.get((node.id, "body")),
                 )

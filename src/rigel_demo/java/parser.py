@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from typing import Literal
 
 from tree_sitter import Node, Parser
 
 from rigel_demo.core.graph_ir import Anchor, EdgeType, Entity, File, GraphEdge, GraphIR, Module, Repository
 from rigel_demo.java.language import BODY_NODE_KINDS, JAVA_LANGUAGE, METHOD_DECLARATION_KINDS, TREE_SITTER_PROVENANCE, TYPE_DECLARATION_KINDS
-from rigel_demo.java.requests import JavaParseRequest
+from rigel_demo.java.requests import GENERATED_ZONE, JavaParseRequest
 from rigel_demo.java.source_utils import node_text, normalize_path, read_package_name
 
 PHYSICAL_MEMBERSHIP_KIND = "physical-membership"
@@ -25,6 +26,7 @@ class _EntityRecord:
     """
 
     entity: Entity
+    name_node: Node
     declaration_node: Node
     body_node: Node | None
     child_records: list["_EntityRecord"] = field(default_factory=list)
@@ -54,11 +56,12 @@ def parse_java_file(
         zone=request.zone,
     )
     normalized_path = normalize_path(relative_path)
+    file_zone = request.file_zone or request.zone
     file_model = File(
         file_id=f"file:{request.repository_name}:{normalized_path}",
         relative_path=normalized_path,
         language="java",
-        zone=request.zone,
+        zone=file_zone,
         content_hash=_content_hash(source_bytes),
     )
 
@@ -79,6 +82,7 @@ def parse_java_file(
         package_name=package_name,
         file_id=file_model.file_id,
         parent_qualified_name=package_name,
+        origin=_entity_origin(file_zone),
     )
     for record in top_level_records:
         _emit_entity_record(graph, file_model.file_id, record)
@@ -93,6 +97,7 @@ def _extract_entity_records(
     package_name: str,
     file_id: str,
     parent_qualified_name: str,
+    origin: str,
 ) -> list[_EntityRecord]:
     """从 AST 子树提取当前层级下的代码实体。
 
@@ -103,15 +108,15 @@ def _extract_entity_records(
     records: list[_EntityRecord] = []
     for child in node.named_children:
         if child.type in TYPE_DECLARATION_KINDS:
-            record = _create_type_record(child, source_bytes, package_name, file_id, parent_qualified_name)
+            record = _create_type_record(child, source_bytes, package_name, file_id, parent_qualified_name, origin)
             records.append(record)
             continue
         if child.type in METHOD_DECLARATION_KINDS:
-            record = _create_method_record(child, source_bytes, package_name, file_id, parent_qualified_name)
+            record = _create_method_record(child, source_bytes, package_name, file_id, parent_qualified_name, origin)
             records.append(record)
             continue
         if child.type == "field_declaration":
-            records.extend(_create_field_records(child, source_bytes, package_name, file_id, parent_qualified_name))
+            records.extend(_create_field_records(child, source_bytes, package_name, file_id, parent_qualified_name, origin))
             continue
 
         # 方法体、类型体和 program 节点只是语义容器，自身不入图，但内部可能声明局部类型或成员。
@@ -123,6 +128,7 @@ def _extract_entity_records(
                     package_name=package_name,
                     file_id=file_id,
                     parent_qualified_name=parent_qualified_name,
+                    origin=origin,
                 )
             )
     return records
@@ -134,6 +140,7 @@ def _create_type_record(
     package_name: str,
     file_id: str,
     parent_qualified_name: str,
+    origin: str,
 ) -> _EntityRecord:
     """创建类型实体记录，并递归收集其直接成员。"""
 
@@ -149,8 +156,10 @@ def _create_type_record(
             qualified_name=qualified_name,
             kind_norm=TYPE_DECLARATION_KINDS[node.type],
             kind_raw=node.type,
+            origin=origin,
             semantic_source=_semantic_source(node, source_bytes),
         ),
+        name_node=name_node,
         declaration_node=node,
         body_node=body_node,
     )
@@ -162,6 +171,7 @@ def _create_type_record(
                 package_name=package_name,
                 file_id=file_id,
                 parent_qualified_name=qualified_name,
+                origin=origin,
             )
         )
     return record
@@ -173,6 +183,7 @@ def _create_method_record(
     package_name: str,
     file_id: str,
     parent_qualified_name: str,
+    origin: str,
 ) -> _EntityRecord:
     """创建方法实体记录。
     """
@@ -189,8 +200,10 @@ def _create_method_record(
             qualified_name=qualified_name,
             kind_norm="method",
             kind_raw=node.type,
+            origin=origin,
             semantic_source=_semantic_source(node, source_bytes),
         ),
+        name_node=name_node,
         declaration_node=node,
         body_node=body_node,
     )
@@ -202,6 +215,7 @@ def _create_method_record(
                 package_name=package_name,
                 file_id=file_id,
                 parent_qualified_name=qualified_name,
+                origin=origin,
             )
         )
     return record
@@ -213,6 +227,7 @@ def _create_field_records(
     package_name: str,
     file_id: str,
     parent_qualified_name: str,
+    origin: str,
 ) -> list[_EntityRecord]:
     """从字段声明中拆分出每一个变量实体。
     """
@@ -234,8 +249,10 @@ def _create_field_records(
                     qualified_name=qualified_name,
                     kind_norm="field",
                     kind_raw=node.type,
+                    origin=origin,
                     semantic_source=_semantic_source(node, source_bytes, extra=display_name),
                 ),
+                name_node=name_node,
                 declaration_node=node,
                 body_node=declarator,
             )
@@ -248,6 +265,7 @@ def _emit_entity_record(graph: GraphIR, parent_id: str, record: _EntityRecord) -
 
     graph.add_node(record.entity)
     _add_contains_edge(graph, parent_id, record.entity.entity_id)
+    _add_anchor(graph, record.entity.entity_id, "name", record.name_node)
     _add_anchor(graph, record.entity.entity_id, "definition", record.declaration_node)
     if record.body_node is not None:
         _add_anchor(graph, record.entity.entity_id, "body", record.body_node)
@@ -263,6 +281,7 @@ def _entity(
     qualified_name: str,
     kind_norm: str,
     kind_raw: str,
+    origin: Literal["internal", "external", "generated"],
     semantic_source: bytes,
 ) -> Entity:
     """构造 Java 实体节点。
@@ -279,9 +298,13 @@ def _entity(
         qualified_name=qualified_name or _join_qualified_name(package_name, display_name),
         kind_norm=kind_norm,
         kind_raw=kind_raw,
-        origin="internal",
+        origin=origin,
         semantic_hash=_content_hash(semantic_source),
     )
+
+
+def _entity_origin(file_zone: str) -> Literal["internal", "external", "generated"]:
+    return "generated" if file_zone == GENERATED_ZONE else "internal"
 
 
 def _add_contains_edge(graph: GraphIR, source_id: str, target_id: str) -> None:

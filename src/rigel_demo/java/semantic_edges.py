@@ -28,6 +28,7 @@ from rigel_demo.java.source_utils import (
     has_parent,
     last_named_child,
     node_text,
+    normalize_path,
     read_imports,
     read_package_name,
     simple_name,
@@ -37,6 +38,8 @@ LSP_PROVENANCE = "lsp"
 LSP_CONFIDENCE = 0.95
 TREE_SITTER_CONFIDENCE = 0.55
 
+ALIAS_GENERATED_MIRROR_KIND = "generated-mirror"
+ALIAS_DUPLICATE_ENTITY_KIND = "duplicate-entity"
 DEPENDENCY_IMPORT_KIND = "imports"
 DEPENDENCY_CALL_KIND = "calls"
 DEPENDENCY_REFERENCE_KIND = "references"
@@ -44,6 +47,7 @@ DEPENDENCY_TYPE_USE_KIND = "type-use"
 SPECIALIZES_EXTENDS_KIND = "extends"
 SPECIALIZES_IMPLEMENTS_KIND = "implements"
 SPECIALIZES_OVERRIDE_KIND = "override"
+
 
 class JavaLspClient(Protocol):
     """语义边补全依赖的最小 LSP 客户端接口。"""
@@ -86,7 +90,7 @@ def enrich_java_semantic_edges(
     with lsp_context as active_lsp:
         # 候选边先由 Tree-sitter 定位语法位置，再交给 LSP 解析真实目标，兼顾覆盖率和语义精度。
         for candidate in _collect_tree_sitter_candidates(repository_root, graph_index):
-            target_entity = _resolve_lsp_target(active_lsp, graph_index, candidate)
+            target_entity = _resolve_lsp_target(active_lsp, repository_root, graph_index, candidate)
             if target_entity is not None and target_entity.node.id != candidate.source_entity_id:
                 _add_semantic_edge(
                     graph,
@@ -109,8 +113,9 @@ def enrich_java_semantic_edges(
                 )
 
         # references 与 override 依赖完整实体索引，放在候选边补全后统一追加，避免重复扫描 AST。
-        _add_lsp_reference_edges(graph, active_lsp, graph_index)
+        _add_lsp_reference_edges(graph, active_lsp, repository_root, graph_index)
         _add_override_edges(graph, graph_index)
+        _add_alias_edges(graph, graph_index)
 
     return graph
 
@@ -237,19 +242,30 @@ def _walk_candidates(
         _walk_candidates(child, source_bytes, graph_index, file_path, package_name, imports, candidates)
 
 
-def _add_lsp_reference_edges(graph: GraphIR, lsp_client: JavaLspClient, graph_index: GraphIndex) -> None:
+def _add_lsp_reference_edges(
+    graph: GraphIR,
+    lsp_client: JavaLspClient,
+    repository_root: Path,
+    graph_index: GraphIndex,
+) -> None:
     for target_entity in graph_index.entities:
-        anchor = target_entity.definition_anchor
+        anchor = target_entity.name_anchor or target_entity.definition_anchor
         if anchor is None:
             continue
         # GraphIR 对外使用 1 基坐标；LSP 协议使用 0 基坐标，请求前必须还原。
         line = int(anchor.properties["start_line"]) - 1
-        column = int(anchor.properties["start_col"]) - 1
+        column = _lsp_utf16_column(
+            repository_root,
+            target_entity.file_path,
+            zero_based_line=line,
+            zero_based_byte_column=int(anchor.properties["start_col"]) - 1,
+        )
         for location in _safe_lsp_locations(lsp_client.request_references, target_entity.file_path, line, column):
             source_entity = graph_index.find_location_owner(location)
             if source_entity is None or source_entity.node.id == target_entity.node.id:
                 continue
-            graph.add_edge(
+            _add_graph_edge_once(
+                graph,
                 GraphEdge.create(
                     EdgeType.DEPENDS_ON,
                     source_entity.node.id,
@@ -257,7 +273,7 @@ def _add_lsp_reference_edges(graph: GraphIR, lsp_client: JavaLspClient, graph_in
                     kind=DEPENDENCY_REFERENCE_KIND,
                     provenance=LSP_PROVENANCE,
                     confidence=LSP_CONFIDENCE,
-                )
+                ),
             )
 
 
@@ -285,7 +301,8 @@ def _add_override_edges(graph: GraphIR, graph_index: GraphIndex) -> None:
             continue
         overridden_methods = methods_by_parent_and_name.get((parent_by_child[parent_entity.node.id], method_name), [])
         for overridden_method in overridden_methods:
-            graph.add_edge(
+            _add_graph_edge_once(
+                graph,
                 GraphEdge.create(
                     EdgeType.SPECIALIZES,
                     method_entity.node.id,
@@ -293,16 +310,67 @@ def _add_override_edges(graph: GraphIR, graph_index: GraphIndex) -> None:
                     kind=SPECIALIZES_OVERRIDE_KIND,
                     provenance=TREE_SITTER_PROVENANCE,
                     confidence=TREE_SITTER_CONFIDENCE,
-                )
+                ),
             )
+
+
+def _add_alias_edges(graph: GraphIR, graph_index: GraphIndex) -> None:
+    """为同一语义身份的多份实体生成 ALIASES 边。"""
+
+    entities_by_key: dict[str, list[EntityView]] = {}
+    for entity in graph_index.entities:
+        entity_key = str(entity.node.properties.get("entity_key", ""))
+        if entity_key:
+            entities_by_key.setdefault(entity_key, []).append(entity)
+
+    for aliased_entities in entities_by_key.values():
+        if len(aliased_entities) < 2:
+            continue
+        canonical_entity = _canonical_alias_entity(aliased_entities)
+        for aliased_entity in aliased_entities:
+            if aliased_entity.node.id == canonical_entity.node.id:
+                continue
+            kind = (
+                ALIAS_GENERATED_MIRROR_KIND
+                if aliased_entity.node.properties.get("origin") == "generated"
+                or canonical_entity.node.properties.get("origin") == "generated"
+                else ALIAS_DUPLICATE_ENTITY_KIND
+            )
+            _add_graph_edge_once(
+                graph,
+                GraphEdge.create(
+                    EdgeType.ALIASES,
+                    aliased_entity.node.id,
+                    canonical_entity.node.id,
+                    kind=kind,
+                    provenance=TREE_SITTER_PROVENANCE,
+                    confidence=1.0,
+                ),
+            )
+
+
+def _canonical_alias_entity(entities: list[EntityView]) -> EntityView:
+    def sort_key(entity: EntityView) -> tuple[int, str]:
+        origin = str(entity.node.properties.get("origin", "internal"))
+        origin_priority = 1 if origin == "generated" else 0
+        return origin_priority, entity.file_path
+
+    return sorted(entities, key=sort_key)[0]
 
 
 def _resolve_lsp_target(
     lsp_client: JavaLspClient,
+    repository_root: Path,
     graph_index: GraphIndex,
     candidate: _SemanticCandidate,
 ) -> EntityView | None:
-    locations = _safe_lsp_locations(lsp_client.request_definition, candidate.file_path, candidate.line, candidate.column)
+    column = _lsp_utf16_column(
+        repository_root,
+        candidate.file_path,
+        zero_based_line=candidate.line,
+        zero_based_byte_column=candidate.column,
+    )
+    locations = _safe_lsp_locations(lsp_client.request_definition, candidate.file_path, candidate.line, column)
     for location in locations:
         target_entity = graph_index.find_location_target(location)
         if target_entity is not None:
@@ -319,6 +387,31 @@ def _safe_lsp_locations(method: object, file_path: str, line: int, column: int) 
     return [dict(location) for location in result]
 
 
+def _lsp_utf16_column(
+    repository_root: Path,
+    file_path: str,
+    *,
+    zero_based_line: int,
+    zero_based_byte_column: int,
+) -> int:
+    """把 Tree-sitter 的 UTF-8 字节列转换成 LSP 默认使用的 UTF-16 列。"""
+
+    source_path = repository_root / normalize_path(file_path)
+    try:
+        source_lines = source_path.read_bytes().splitlines()
+    except OSError:
+        return zero_based_byte_column
+    if zero_based_line < 0 or zero_based_line >= len(source_lines):
+        return zero_based_byte_column
+
+    line_prefix = source_lines[zero_based_line][:zero_based_byte_column]
+    try:
+        decoded_prefix = line_prefix.decode("utf-8")
+    except UnicodeDecodeError:
+        return zero_based_byte_column
+    return len(decoded_prefix.encode("utf-16-le")) // 2
+
+
 def _add_semantic_edge(
     graph: GraphIR,
     candidate: _SemanticCandidate,
@@ -327,7 +420,8 @@ def _add_semantic_edge(
     provenance: str,
     confidence: float,
 ) -> None:
-    graph.add_edge(
+    _add_graph_edge_once(
+        graph,
         GraphEdge.create(
             candidate.edge_type,
             candidate.source_entity_id,
@@ -335,8 +429,14 @@ def _add_semantic_edge(
             kind=candidate.kind,
             provenance=provenance,
             confidence=confidence,
-        )
+        ),
     )
+
+
+def _add_graph_edge_once(graph: GraphIR, edge: GraphEdge) -> None:
+    if any(existing_edge.id == edge.id for existing_edge in graph.edges):
+        return
+    graph.add_edge(edge)
 
 
 def _candidate(
@@ -380,4 +480,3 @@ def _split_method_owner_and_name(qualified_name: str) -> tuple[str, str]:
     owner_name, _, method_signature = qualified_name.partition("#")
     method_name = method_signature.split("(", 1)[0]
     return owner_name, method_name
-

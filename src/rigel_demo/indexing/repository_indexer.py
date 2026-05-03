@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
-from rigel_demo.core.graph_ir import EdgeType, GraphEdge, GraphIR, Module, Repository
+from rigel_demo.core.graph_ir import GraphIR, Repository
 from rigel_demo.embedding import EmbeddingConfig, RigelEmbedding
 from rigel_demo.indexing.retrieval_summaries import (
     SummaryEmbeddingClient,
@@ -13,7 +14,12 @@ from rigel_demo.indexing.retrieval_summaries import (
     attach_retrieval_summaries,
 )
 from rigel_demo.java import JavaParseRequest, JavaSemanticEdgeRequest, enrich_java_semantic_edges, parse_java_file
-from rigel_demo.java.requests import DEFAULT_MODULE_ECOSYSTEM, DEFAULT_MODULE_NAME, DEFAULT_ZONE
+from rigel_demo.java.requests import (
+    DEFAULT_MODULE_ECOSYSTEM,
+    DEFAULT_MODULE_NAME,
+    DEFAULT_ZONE,
+    GENERATED_ZONE,
+)
 from rigel_demo.llm import LLMConfig, LLMConfigSection, RigelLLM
 
 
@@ -31,9 +37,38 @@ IGNORED_DIRECTORY_NAMES = {
     "build",
     "dist",
     "node_modules",
+    "out",
     "target",
     "venv",
 }
+
+JAVA_SOURCE_ROOT_PATTERNS: tuple[tuple[str, ...], ...] = (
+    ("src", "main", "java"),
+    ("src", "test", "java"),
+    ("src", "generated", "java"),
+    ("generated", "src", "main", "java"),
+    ("generated-sources",),
+)
+MAVEN_MARKER_FILE_NAME = "pom.xml"
+GRADLE_MARKER_FILE_NAMES = {"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"}
+TEST_PATH_PARTS = {"test", "tests", "it", "integrationtest", "integration-test"}
+TOOLING_PATH_PARTS = {"tool", "tools", "tooling", "script", "scripts", "buildsrc", "build-logic"}
+VENDOR_PATH_PARTS = {"vendor", "third_party", "third-party", "external"}
+GENERATED_PATH_PARTS = {"generated", "generated-sources", "build", "out", "target"}
+GENERATED_SOURCE_MARKER_PARTS = {"generated", "generated-sources"}
+
+
+@dataclass(frozen=True, slots=True)
+class JavaFileIndexTarget:
+    """单个 Java 文件在仓库内的模块和分区归属。"""
+
+    source_path: Path
+    relative_path: str
+    module_name: str
+    module_root_path: str
+    module_ecosystem: str
+    module_zone: str
+    file_zone: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,14 +95,20 @@ def index_repository(
         LLMConfig.from_repository(resolved_repository_path, LLMConfigSection.SUMMARY)
     )
     repository_name = resolved_repository_path.name
-    request = JavaParseRequest(repository_name=repository_name)
-    graph = _base_graph(request)
+    graph = _base_graph(repository_name)
     indexed_file_count = 0
 
     # 单文件解析会各自产生 Repository/Module 节点，合并时按 id 去重以保留解析器的自包含输出。
-    for source_path in _iter_java_files(resolved_repository_path):
-        relative_path = source_path.relative_to(resolved_repository_path).as_posix()
-        file_graph = parse_java_file(source_path.read_bytes(), relative_path, request=request)
+    for target in _iter_java_targets(resolved_repository_path):
+        request = JavaParseRequest(
+            repository_name=repository_name,
+            module_name=target.module_name,
+            module_root_path=target.module_root_path,
+            module_ecosystem=target.module_ecosystem,
+            zone=target.module_zone,
+            file_zone=target.file_zone,
+        )
+        file_graph = parse_java_file(target.source_path.read_bytes(), target.relative_path, request=request)
         _merge_graph(graph, file_graph)
         indexed_file_count += 1
 
@@ -86,40 +127,112 @@ def index_repository(
     return RepositoryIndexResult(graph=graph, indexed_file_count=indexed_file_count)
 
 
-def _base_graph(request: JavaParseRequest) -> GraphIR:
+def _base_graph(repository_name: str) -> GraphIR:
     graph = GraphIR()
-    repository = Repository(repo_id=f"repo:{request.repository_name}", name=request.repository_name)
-    module = Module(
-        module_id=f"module:{request.repository_name}:{DEFAULT_MODULE_NAME}",
-        name=DEFAULT_MODULE_NAME,
-        root_path=".",
-        ecosystem=DEFAULT_MODULE_ECOSYSTEM,
-        zone=DEFAULT_ZONE,
-    )
+    repository = Repository(repo_id=f"repo:{repository_name}", name=repository_name)
     graph.add_node(repository)
-    graph.add_node(module)
-    graph.add_edge(
-        GraphEdge.create(
-            EdgeType.CONTAINS,
-            repository.repo_id,
-            module.module_id,
-            kind="physical-membership",
-        )
-    )
     return graph
 
 
-def _iter_java_files(repository_path: Path) -> list[Path]:
+def _iter_java_targets(repository_path: Path) -> list[JavaFileIndexTarget]:
     # 排序让索引输出在不同文件系统遍历顺序下保持稳定，便于测试和演示复现。
     return sorted(
-        path
-        for path in repository_path.rglob("*.java")
-        if path.is_file() and not _is_ignored_path(path.relative_to(repository_path))
+        (
+            _java_file_target(repository_path, path)
+            for path in repository_path.rglob("*.java")
+            if path.is_file() and not _is_ignored_path(path.relative_to(repository_path))
+        ),
+        key=lambda target: target.relative_path,
     )
 
 
 def _is_ignored_path(relative_path: Path) -> bool:
-    return any(part in IGNORED_DIRECTORY_NAMES for part in relative_path.parts)
+    parts = {part.lower() for part in relative_path.parts}
+    ignored_parts = parts & IGNORED_DIRECTORY_NAMES
+    if not ignored_parts:
+        return False
+    if ignored_parts <= {"build", "out", "target"} and parts & GENERATED_SOURCE_MARKER_PARTS:
+        return False
+    return True
+
+
+def _java_file_target(repository_path: Path, source_path: Path) -> JavaFileIndexTarget:
+    relative_path = source_path.relative_to(repository_path)
+    module_root = _detect_module_root(repository_path, relative_path)
+    source_root = _detect_java_source_root(relative_path.relative_to(module_root))
+    module_relative_path = relative_path.relative_to(module_root)
+    file_zone = _detect_file_zone(module_relative_path, source_root=source_root)
+    module_name = _module_name(module_root)
+    module_zone = _module_zone(file_zone)
+    return JavaFileIndexTarget(
+        source_path=source_path,
+        relative_path=relative_path.as_posix(),
+        module_name=module_name,
+        module_root_path=module_root.as_posix(),
+        module_ecosystem=_detect_module_ecosystem(repository_path, module_root),
+        module_zone=module_zone,
+        file_zone=file_zone,
+    )
+
+
+def _detect_module_root(repository_path: Path, relative_path: Path) -> Path:
+    parent_parts = relative_path.parts[:-1]
+    for part_count in range(len(parent_parts), -1, -1):
+        candidate = Path(*parent_parts[:part_count]) if part_count else Path(".")
+        absolute_candidate = repository_path / candidate
+        if _has_module_marker(absolute_candidate):
+            return candidate
+    return Path(".")
+
+
+def _has_module_marker(path: Path) -> bool:
+    return (path / MAVEN_MARKER_FILE_NAME).exists() or any((path / marker).exists() for marker in GRADLE_MARKER_FILE_NAMES)
+
+
+def _detect_java_source_root(module_relative_path: Path) -> Path:
+    parts = module_relative_path.parts
+    for pattern in JAVA_SOURCE_ROOT_PATTERNS:
+        pattern_length = len(pattern)
+        if len(parts) >= pattern_length and tuple(part.lower() for part in parts[:pattern_length]) == pattern:
+            return Path(*parts[:pattern_length])
+    return Path(".")
+
+
+def _detect_file_zone(module_relative_path: Path, *, source_root: Path) -> str:
+    parts = {part.lower() for part in module_relative_path.parts}
+    source_root_parts = {part.lower() for part in source_root.parts}
+    if parts & GENERATED_PATH_PARTS or source_root_parts & GENERATED_PATH_PARTS:
+        return GENERATED_ZONE
+    if parts & VENDOR_PATH_PARTS:
+        return "vendor"
+    if parts & TOOLING_PATH_PARTS:
+        return "tooling"
+    if parts & TEST_PATH_PARTS:
+        return "test"
+    return DEFAULT_ZONE
+
+
+def _module_zone(file_zone: str) -> Literal["prod", "test", "tooling", "vendor", "generated"]:
+    if file_zone == "vendor":
+        return "vendor"
+    if file_zone == "tooling":
+        return "tooling"
+    return DEFAULT_ZONE
+
+
+def _module_name(module_root: Path) -> str:
+    if module_root == Path("."):
+        return DEFAULT_MODULE_NAME
+    return module_root.as_posix().replace("/", ":")
+
+
+def _detect_module_ecosystem(repository_path: Path, module_root: Path) -> str:
+    absolute_module_root = repository_path / module_root
+    if (absolute_module_root / MAVEN_MARKER_FILE_NAME).exists():
+        return DEFAULT_MODULE_ECOSYSTEM
+    if any((absolute_module_root / marker).exists() for marker in GRADLE_MARKER_FILE_NAMES):
+        return "gradle"
+    return DEFAULT_MODULE_ECOSYSTEM
 
 
 def _merge_graph(target: GraphIR, source: GraphIR) -> None:

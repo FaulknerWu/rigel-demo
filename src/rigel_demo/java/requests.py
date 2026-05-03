@@ -7,6 +7,7 @@ from dataclasses import dataclass
 DEFAULT_MODULE_NAME = "root"
 DEFAULT_MODULE_ECOSYSTEM = "maven"
 DEFAULT_ZONE = "prod"
+GENERATED_ZONE = "generated"
 DEFAULT_LSP_TIMEOUT_SECONDS = 60
 
 
@@ -23,6 +24,7 @@ class JavaParseRequest:
     module_root_path: str = "."
     module_ecosystem: str = DEFAULT_MODULE_ECOSYSTEM
     zone: str = DEFAULT_ZONE
+    file_zone: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
