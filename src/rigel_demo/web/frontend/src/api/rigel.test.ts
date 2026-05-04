@@ -13,11 +13,11 @@ import {
 
 const apiNode: ApiNode = {
   id: 'node-1',
-  type: 'Class',
+  type: 'Entity',
   label: 'RepositoryIndexer',
   properties: {
-    qualified_name: 'rigel_demo.indexing.RepositoryIndexer',
-    relative_path: 'src/rigel_demo/indexing/repository_indexer.py',
+    qualified_name: 'rigel_demo.project.RepositoryIndexer',
+    relative_path: 'src/rigel_demo/project/repository_indexer.py',
     start_line: 12,
     end_line: 48,
   },
@@ -30,7 +30,7 @@ const apiGraph: ApiGraph = {
       id: 'edge-1',
       source: 'node-1',
       target: 'node-2',
-      type: 'CALLS',
+      type: 'DEPENDS_ON',
       properties: {},
     },
   ],
@@ -39,13 +39,13 @@ const apiGraph: ApiGraph = {
 const apiSummary: ApiSummary = {
   node_count: 3,
   edge_count: 2,
-  node_types: [{ type: 'Class', count: 1 }],
+  node_types: [{ type: 'Entity', count: 1 }],
 };
 
 const graphNode = adaptNode(apiNode);
 assert.equal(graphNode.id, 'node-1');
 assert.equal(graphNode.name, 'RepositoryIndexer');
-assert.equal(graphNode.group, 'Class');
+assert.equal(graphNode.group, 'Entity');
 assert.match(graphNode.summary, /RepositoryIndexer/);
 assert.match(graphNode.summary, /第 12-48 行/);
 
@@ -56,14 +56,14 @@ assert.deepEqual(graphData.links[0], {
   id: 'edge-1',
   source: 'node-1',
   target: 'node-2',
-  type: 'CALLS',
+  type: 'DEPENDS_ON',
 });
 
 const graphSummary = adaptSummary(apiSummary);
 assert.deepEqual(graphSummary, {
   nodeCount: 3,
   edgeCount: 2,
-  nodeTypes: [{ type: 'Class', count: 1 }],
+  nodeTypes: [{ type: 'Entity', count: 1 }],
 });
 
 const apiIndexResult: ApiIndexResult = {
@@ -90,8 +90,8 @@ assert.equal(indexResult.graphEdgeCount, 24);
 const chatResponse: ApiChatResponse = {
   status: 'success',
   message: { role: 'assistant', content: 'PaymentService 处理付款流程' },
-  tool_calls: [{ name: 'recall', args: { query: 'PaymentService' } }],
+  queries: [{ name: 'cypher', args: { query: 'MATCH (entity:Entity) RETURN entity' } }],
   model: 'gpt-5.2',
   provider: 'openai',
 };
-assert.equal(chatResponse.tool_calls[0].name, 'recall');
+assert.equal(chatResponse.queries[0].name, 'cypher');

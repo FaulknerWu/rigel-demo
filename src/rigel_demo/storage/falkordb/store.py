@@ -7,13 +7,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rigel_demo.core.graph_ir import GraphEdge, GraphIR, GraphNode, JsonObject, JsonValue
-
-
-RIGEL_NODE_LABEL = "RigelNode"
-SUMMARY_NODE_LABEL = "Summary"
-SUMMARY_EMBEDDING_PROPERTY = "embedding"
-SUMMARY_VECTOR_SIMILARITY_FUNCTION = "cosine"
+from rigel_demo.graph.ir import GraphEdge, GraphIR, GraphNode, JsonObject, JsonValue
+from rigel_demo.graph.schema import (
+    RIGEL_NODE_LABEL,
+    SUMMARY_EMBEDDING_PROPERTY,
+    SUMMARY_NODE_LABEL,
+    SUMMARY_VECTOR_SIMILARITY_FUNCTION,
+    node_schema,
+    relationship_type,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,13 +131,13 @@ class FalkorDBStore:
     def upsert_node(self, node: GraphNode) -> None:
         """写入或更新单个 GraphIR 节点。"""
 
-        node_type = node.type.value
+        schema = node_schema(node.type)
         raw_properties: JsonObject = {
             "id": node.id,
             "rigel_type": node.type.value,
             **node.properties,
         }
-        native_embedding = _summary_embedding(raw_properties) if node_type == SUMMARY_NODE_LABEL else None
+        native_embedding = _summary_embedding(raw_properties) if schema.type_label == SUMMARY_NODE_LABEL else None
         if native_embedding is not None:
             # 向量字段必须以 FalkorDB vecf32 写入；不能走通用属性序列化，否则原生向量索引用不了。
             raw_properties = dict(raw_properties)
@@ -145,7 +147,7 @@ class FalkorDBStore:
         # node_type 来自 GraphIR 枚举，不接受外部输入；属性值统一走参数化绑定。
         self._graph.query(
             f"""
-            MERGE (node:{RIGEL_NODE_LABEL}:{node_type} {{id: $id}})
+            MERGE (node:{schema.common_label}:{schema.type_label} {{id: $id}})
             SET node += $properties
             """,
             {"id": node.id, "properties": properties},
@@ -153,7 +155,7 @@ class FalkorDBStore:
         if native_embedding is not None:
             self._graph.query(
                 f"""
-                MATCH (node:{RIGEL_NODE_LABEL}:{node_type} {{id: $id}})
+                MATCH (node:{schema.common_label}:{schema.type_label} {{id: $id}})
                 SET node.{SUMMARY_EMBEDDING_PROPERTY} = vecf32($embedding)
                 """,
                 {"id": node.id, "embedding": native_embedding},
@@ -162,7 +164,7 @@ class FalkorDBStore:
     def upsert_edge(self, edge: GraphEdge) -> None:
         """写入或更新单条 GraphIR 边。"""
 
-        edge_type = edge.type.value
+        edge_type = relationship_type(edge.type)
         properties = _database_properties(
             {
                 "id": edge.id,

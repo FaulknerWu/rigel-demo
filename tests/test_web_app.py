@@ -9,9 +9,10 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from rigel_demo.core import Anchor, EdgeType, Entity, File, GraphEdge, GraphIR, Module, Repository
+from rigel_demo.entities import Anchor, Entity, File, Module, Repository
+from rigel_demo.graph import EdgeType, GraphEdge, GraphIR
 from rigel_demo.embedding import EmbeddingConfig, EmbeddingConfigurationError, EmbeddingFormat
-from rigel_demo.indexing.retrieval_summaries import attach_retrieval_summaries
+from rigel_demo.project.summaries import attach_retrieval_summaries
 from rigel_demo.llm import (
     DEFAULT_CHAT_SYSTEM_PROMPT,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
@@ -20,9 +21,9 @@ from rigel_demo.llm import (
     LLMConfigurationError,
     LLMMessage,
 )
-from rigel_demo.agent.langgraph_agent import AgentReply, ToolCallTrace
-from rigel_demo.agent.service import RepositorySourceReader, SourceLineRangeError
-from rigel_demo.storage import FalkorDBConfig, FalkorDBStore
+from rigel_demo.graphrag import GraphRAGReply, GraphRAGTrace
+from rigel_demo.query.service import RepositorySourceReader, RigelGraphReader, SourceLineRangeError
+from rigel_demo.storage.falkordb import FalkorDBConfig, FalkorDBStore
 from rigel_demo.web.app import create_app
 
 
@@ -34,6 +35,19 @@ class WebAppLLMTest(TestCase):
             _write_demo_graph(repository_path, fake_embedding, write_config=False)
 
             with self.assertRaisesRegex(LLMConfigurationError, ".rigel/config.json"):
+                create_app(repository_path, embedding_client=fake_embedding)
+
+    def test_create_app_requires_graphrag_config_at_startup(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            config_path = repository_path / ".rigel" / "config.json"
+            config_data = json.loads(config_path.read_text(encoding="utf-8"))
+            config_data.pop("graphrag")
+            config_path.write_text(json.dumps(config_data, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "graphrag"):
                 create_app(repository_path, embedding_client=fake_embedding)
 
     def test_create_app_requires_embedding_config_at_startup(self) -> None:
@@ -52,23 +66,23 @@ class WebAppLLMTest(TestCase):
             )
 
             with self.assertRaisesRegex(EmbeddingConfigurationError, "embedding"):
-                create_app(repository_path, chat_client=_FakeGraphAgent())
+                create_app(repository_path, chat_client=_FakeGraphRAGChat())
 
-    def test_chat_uses_injected_agent_client(self) -> None:
-        fake_agent = _FakeGraphAgent()
+    def test_chat_uses_injected_graphrag_client(self) -> None:
+        fake_chat = _FakeGraphRAGChat()
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, chat_client=fake_agent, embedding_client=fake_embedding))
+            client = TestClient(create_app(repository_path, chat_client=fake_chat, embedding_client=fake_embedding))
 
             response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "PaymentService 做什么"}]})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["message"], {"role": "assistant", "content": "测试回复"})
-        self.assertEqual(payload["tool_calls"], [{"name": "recall", "args": {"query": "PaymentService 做什么"}}])
-        self.assertEqual(fake_agent.messages[0], LLMMessage(role="user", content="PaymentService 做什么"))
+        self.assertEqual(payload["queries"], [{"name": "cypher", "args": {"query": "MATCH (n) RETURN n"}}])
+        self.assertEqual(fake_chat.messages[0], LLMMessage(role="user", content="PaymentService 做什么"))
 
     def test_recall_uses_falkordb_vector_index(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
@@ -107,18 +121,37 @@ class WebAppLLMTest(TestCase):
                     with self.assertRaisesRegex(SourceLineRangeError, "必须大于 0"):
                         source_reader.read_slice("Demo.java", **invalid_case)
 
-    def test_chat_returns_agent_tool_trace_when_graph_exists(self) -> None:
-        fake_agent = _FakeGraphAgent(
-            AgentReply(
+    def test_query_reader_supports_neighbors_paths_and_auto_complete(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            database_path = _write_demo_graph(repository_path, fake_embedding)
+            graph_reader = RigelGraphReader(database_path=database_path, graph_name="rigel")
+
+            neighbors = graph_reader.neighbors(["entity:demo:PaymentService"], limit=5)
+            paths = graph_reader.paths(
+                source_id="repo:demo",
+                target_id="entity:demo:PaymentService",
+                max_depth=3,
+                limit=5,
+            )
+            completions = graph_reader.auto_complete("Payment", limit=5)
+
+        self.assertEqual(neighbors["entity:demo:PaymentService"][0]["edge"]["type"], "CONTAINS")
+        self.assertEqual(paths[0]["nodes"][0]["id"], "repo:demo")
+        self.assertEqual(paths[0]["nodes"][-1]["id"], "entity:demo:PaymentService")
+        self.assertEqual(completions[0]["label"], "PaymentService")
+
+    def test_chat_returns_graphrag_query_trace_when_graph_exists(self) -> None:
+        fake_chat = _FakeGraphRAGChat(
+            GraphRAGReply(
                 content="PaymentService 处理付款流程",
-                tool_calls=[
-                    ToolCallTrace(name="recall", args={"query": "PaymentService 做什么"}),
-                    ToolCallTrace(
-                        name="source",
+                traces=[
+                    GraphRAGTrace(name="cypher", args={"query": "MATCH (entity:Entity) RETURN entity"}),
+                    GraphRAGTrace(
+                        name="context",
                         args={
-                            "path": "src/main/java/demo/PaymentService.java",
-                            "start_line": 3,
-                            "end_line": 5,
+                            "items": 2,
                         },
                     ),
                 ],
@@ -128,35 +161,41 @@ class WebAppLLMTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, chat_client=fake_agent, embedding_client=fake_embedding))
+            client = TestClient(create_app(repository_path, chat_client=fake_chat, embedding_client=fake_embedding))
 
             response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "PaymentService 做什么"}]})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["message"]["content"], "PaymentService 处理付款流程")
-        self.assertEqual([tool_call["name"] for tool_call in payload["tool_calls"]], ["recall", "source"])
+        self.assertEqual([query["name"] for query in payload["queries"]], ["cypher", "context"])
 
-    def test_chat_keeps_raw_messages_for_agent(self) -> None:
-        fake_agent = _FakeGraphAgent(AgentReply(content="没有找到确定证据", tool_calls=[]))
+    def test_chat_keeps_raw_messages_for_graphrag(self) -> None:
+        fake_chat = _FakeGraphRAGChat(GraphRAGReply(content="没有找到确定证据", traces=[]))
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, chat_client=fake_agent, embedding_client=fake_embedding))
+            client = TestClient(create_app(repository_path, chat_client=fake_chat, embedding_client=fake_embedding))
 
             response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "NoMatch"}]})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["tool_calls"], [])
-        self.assertEqual(fake_agent.messages[0], LLMMessage(role="user", content="NoMatch"))
+        self.assertEqual(response.json()["queries"], [])
+        self.assertEqual(fake_chat.messages[0], LLMMessage(role="user", content="NoMatch"))
 
     def test_incremental_index_endpoint_returns_shared_result_payload(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
+            client = TestClient(
+                create_app(
+                    repository_path,
+                    chat_client=_FakeGraphRAGChat(),
+                    embedding_client=fake_embedding,
+                )
+            )
 
             with patch("rigel_demo.web.app.index_repository_workspace") as index_repository_workspace:
                 index_repository_workspace.return_value = SimpleNamespace(
@@ -299,6 +338,12 @@ def _demo_config_json() -> str:
     return json.dumps(
         {
             "chat": _demo_llm_config(DEFAULT_CHAT_SYSTEM_PROMPT),
+            "graphrag": {
+                "falkordb_host": "127.0.0.1",
+                "falkordb_port": 6379,
+                "falkordb_username": None,
+                "falkordb_password": None,
+            },
             "summary": {
                 **_demo_llm_config(DEFAULT_SUMMARY_SYSTEM_PROMPT),
                 "temperature": 0,
@@ -333,8 +378,8 @@ def _demo_llm_config(system_prompt: str) -> dict[str, object]:
     }
 
 
-class _FakeGraphAgent:
-    def __init__(self, reply: AgentReply | None = None) -> None:
+class _FakeGraphRAGChat:
+    def __init__(self, reply: GraphRAGReply | None = None) -> None:
         self.config = LLMConfig(
             provider="openai",
             model="fake-model",
@@ -345,12 +390,12 @@ class _FakeGraphAgent:
             section=LLMConfigSection.CHAT,
         )
         self.messages: list[LLMMessage] = []
-        self.reply = reply or AgentReply(
+        self.reply = reply or GraphRAGReply(
             content="测试回复",
-            tool_calls=[ToolCallTrace(name="recall", args={"query": "PaymentService 做什么"})],
+            traces=[GraphRAGTrace(name="cypher", args={"query": "MATCH (n) RETURN n"})],
         )
 
-    def generate_reply(self, messages: list[LLMMessage]) -> AgentReply:
+    def send_messages(self, messages: list[LLMMessage]) -> GraphRAGReply:
         self.messages = messages
         return self.reply
 

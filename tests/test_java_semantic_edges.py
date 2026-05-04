@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
-from rigel_demo.core import EdgeType, NodeType
+from rigel_demo.graph import EdgeType, NodeType
 from rigel_demo.java import JavaParseRequest, JavaSemanticEdgeRequest, enrich_java_semantic_edges, parse_java_file
 from rigel_demo.java.requests import GENERATED_ZONE
 

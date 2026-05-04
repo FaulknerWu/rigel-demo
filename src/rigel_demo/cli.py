@@ -29,6 +29,12 @@ DEFAULT_CONFIG_DOCUMENT = {
         "port": 5000,
         "open_browser": True,
     },
+    "graphrag": {
+        "falkordb_host": "127.0.0.1",
+        "falkordb_port": 6379,
+        "falkordb_username": None,
+        "falkordb_password": None,
+    },
     "chat": {
         "provider": "openai",
         "model": "gpt-5.2",
@@ -146,8 +152,8 @@ def init_repository(repository_path: Path | None = None) -> InitResult:
 def index_repository_workspace(repository_path: Path | None = None, *, incremental: bool = False) -> IndexResult:
     """扫描目标仓库并重建 Rigel 本地图数据库。"""
 
-    from rigel_demo.storage.falkordb_store import FalkorDBConfig, FalkorDBStore
-    from rigel_demo.indexing.repository_indexer import index_repository, index_repository_incremental
+    from rigel_demo.project.repository_indexer import index_repository, index_repository_incremental
+    from rigel_demo.storage.falkordb.store import FalkorDBConfig, FalkorDBStore
 
     resolved_repository_path = (repository_path or Path.cwd()).resolve()
     workspace_path = resolved_repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
@@ -434,7 +440,7 @@ def _write_default_config_if_missing(config_path: Path) -> bool:
 
 
 def _write_workspace_state(state_path: Path, result: IndexResult) -> None:
-    """写入 MCP 与后续命令可复用的索引状态文件。"""
+    """写入后续命令可复用的索引状态文件。"""
 
     state = {
         **asdict(result),

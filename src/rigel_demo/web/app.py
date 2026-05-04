@@ -21,33 +21,28 @@ from rigel_demo.cli import (
     index_repository_workspace,
     index_result_payload,
 )
-from rigel_demo.agent.service import (
-    DEFAULT_GRAPH_LIMIT,
-    RepositorySourceReader,
-    RigelGraphReader,
+from rigel_demo.graphrag import (
+    RigelChatService,
+    RigelGraphRAGError,
+    build_graphrag_chat_service,
 )
-from rigel_demo.agent.langgraph_agent import (
-    CodeGraphAgentError,
-    CodeGraphAgentRunner,
-    LangGraphCodeAgent,
+from rigel_demo.query.service import (
+    DEFAULT_GRAPH_LIMIT,
+    RigelGraphReader,
 )
 from rigel_demo.embedding import (
     EmbeddingConfig,
-    EmbeddingRequestError,
-    EmbeddingResponseError,
     RigelEmbedding,
 )
 from rigel_demo.llm import (
-    LLMConfig,
-    LLMConfigSection,
     LLMMessage,
-    LLMResponseError,
 )
+
 
 def create_app(
     repository_path: Path | None = None,
     *,
-    chat_client: CodeGraphAgentRunner | None = None,
+    chat_client: RigelChatService | None = None,
     embedding_client: RigelEmbedding | None = None,
 ) -> FastAPI:
     """创建基于当前仓库 `.rigel` 目录的 Web 演示应用。"""
@@ -61,14 +56,12 @@ def create_app(
     static_index_path = static_frontend_path / "index.html"
     graph_name = _read_graph_name(state_path)
     graph_reader = RigelGraphReader(database_path=database_path, graph_name=graph_name)
-    source_reader = RepositorySourceReader(resolved_repository_path)
     active_embedding_client = _resolve_embedding_client(resolved_repository_path, embedding_client)
     active_chat_client = _resolve_chat_client(
         resolved_repository_path,
         chat_client,
-        graph_reader=graph_reader,
-        source_reader=source_reader,
-        embedding_client=active_embedding_client,
+        database_path=database_path,
+        graph_name=graph_name,
     )
     incremental_index_lock = Lock()
 
@@ -139,20 +132,16 @@ def create_app(
             raise HTTPException(status_code=400, detail="最后一条消息必须来自用户")
 
         try:
-            agent_reply = active_chat_client.generate_reply(messages)
-        except (EmbeddingRequestError, EmbeddingResponseError) as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
-        except CodeGraphAgentError as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
-        except LLMResponseError as error:
+            chat_reply = active_chat_client.send_messages(messages)
+        except RigelGraphRAGError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
 
         return {
             "status": "success",
-            "message": {"role": "assistant", "content": agent_reply.content},
-            "tool_calls": [
-                {"name": tool_call.name, "args": tool_call.args}
-                for tool_call in agent_reply.tool_calls
+            "message": {"role": "assistant", "content": chat_reply.content},
+            "queries": [
+                {"name": trace.name, "args": trace.args}
+                for trace in chat_reply.traces
             ],
             "model": active_chat_client.config.model,
             "provider": active_chat_client.config.provider,
@@ -198,20 +187,17 @@ def _ensure_database_exists(database_path: Path) -> None:
 
 def _resolve_chat_client(
     repository_path: Path,
-    provided_client: CodeGraphAgentRunner | None,
+    provided_client: RigelChatService | None,
     *,
-    graph_reader: RigelGraphReader,
-    source_reader: RepositorySourceReader,
-    embedding_client: RigelEmbedding,
-) -> CodeGraphAgentRunner:
+    database_path: Path,
+    graph_name: str,
+) -> RigelChatService:
     if provided_client is not None:
         return provided_client
 
-    return LangGraphCodeAgent(
-        config=LLMConfig.from_repository(repository_path, LLMConfigSection.CHAT),
-        graph_reader=graph_reader,
-        source_reader=source_reader,
-        embedding_client=embedding_client,
+    return build_graphrag_chat_service(
+        repository_path=repository_path,
+        graph_name=graph_name,
     )
 
 
@@ -225,10 +211,11 @@ def _resolve_embedding_client(
     return RigelEmbedding(EmbeddingConfig.from_repository(repository_path))
 
 
-def _llm_status(llm_client: CodeGraphAgentRunner) -> dict[str, object]:
+def _llm_status(llm_client: RigelChatService) -> dict[str, object]:
     config = llm_client.config
     return {
         "configured": True,
+        "runtime": "graphrag-sdk",
         "provider": config.provider,
         "model": config.model,
         "base_url": config.base_url,

@@ -46,7 +46,7 @@ export interface ApiChatMessage {
   content: string;
 }
 
-export interface ApiToolCall {
+export interface ApiGraphRAGQuery {
   name: string;
   args: Record<string, unknown>;
 }
@@ -54,7 +54,7 @@ export interface ApiToolCall {
 export interface ApiChatResponse {
   status: string;
   message: ApiChatMessage;
-  tool_calls: ApiToolCall[];
+  queries: ApiGraphRAGQuery[];
   model: string;
   provider: string;
 }
@@ -108,7 +108,7 @@ export type ChatMessage = ApiChatMessage;
 
 export interface ChatResponse {
   message: ChatMessage;
-  toolCalls: ApiToolCall[];
+  queries: ApiGraphRAGQuery[];
 }
 
 export interface IndexResult {
@@ -164,7 +164,7 @@ export async function sendChatMessage(messages: ChatMessage[]): Promise<ChatResp
   const payload = await readJson<ApiChatResponse>(response);
   return {
     message: payload.message,
-    toolCalls: payload.tool_calls,
+    queries: payload.queries,
   };
 }
 

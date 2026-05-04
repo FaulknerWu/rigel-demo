@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { ArrowUp, Bot, Brain, Hammer, Plus, Search, Sparkles, User } from 'lucide-react';
-import { sendChatMessage, type ApiToolCall, type ChatMessage } from '../api/rigel';
+import { ArrowUp, Bot, Brain, Database, Plus, Search, Sparkles, User } from 'lucide-react';
+import { sendChatMessage, type ApiGraphRAGQuery, type ChatMessage } from '../api/rigel';
 
 interface Message {
-  role: 'user' | 'agent';
+  role: 'user' | 'assistant';
   content: string;
-  toolCalls?: ApiToolCall[];
+  queries?: ApiGraphRAGQuery[];
 }
 
 export default function ChatPanel() {
@@ -27,11 +27,11 @@ export default function ChatPanel() {
       const response = await sendChatMessage(nextMessages.map(toChatMessage));
       setMessages((currentMessages) => [
         ...currentMessages,
-        { role: 'agent', content: response.message.content, toolCalls: response.toolCalls },
+        { role: 'assistant', content: response.message.content, queries: response.queries },
       ]);
     } catch (error) {
       const message = error instanceof Error ? error.message : '请求失败';
-      setMessages((currentMessages) => [...currentMessages, { role: 'agent', content: `未能完成模型调用：${message}` }]);
+      setMessages((currentMessages) => [...currentMessages, { role: 'assistant', content: `未能完成模型调用：${message}` }]);
     } finally {
       setIsResponding(false);
     }
@@ -41,7 +41,7 @@ export default function ChatPanel() {
     <aside className="relative flex h-full flex-col bg-white text-slate-800">
       <div className="flex items-center gap-2 border-b border-slate-100 p-4">
         <div className="h-2 w-2 animate-pulse rounded-full bg-black shadow-[0_0_8px_rgba(0,0,0,0.3)]"></div>
-        <span className="text-xs font-semibold uppercase tracking-wider text-slate-800">Graph AI Agent</span>
+        <span className="text-xs font-semibold uppercase tracking-wider text-slate-800">GraphRAG Chat</span>
       </div>
 
       <div className="flex flex-1 flex-col overflow-y-auto">
@@ -60,16 +60,16 @@ export default function ChatPanel() {
                   {message.role === 'user' ? <User className="h-4 w-4 text-slate-500" /> : <Bot className="h-4 w-4" />}
                 </div>
                 <div className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
-                  {message.role === 'agent' && message.toolCalls && message.toolCalls.length > 0 && (
+                  {message.role === 'assistant' && message.queries && message.queries.length > 0 && (
                     <div className="mb-2 flex max-w-[280px] flex-wrap gap-1.5">
-                      {message.toolCalls.map((toolCall, toolIndex) => (
+                      {message.queries.map((query, queryIndex) => (
                         <span
-                          key={`${toolCall.name}-${toolIndex}`}
+                          key={`${query.name}-${queryIndex}`}
                           className="inline-flex max-w-full items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-600"
-                          title={formatToolArgs(toolCall.args)}
+                          title={formatQueryArgs(query.args)}
                         >
-                          <Hammer className="h-3 w-3 shrink-0" />
-                          <span className="truncate">{formatToolCall(toolCall)}</span>
+                          <Database className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{formatGraphRAGQuery(query)}</span>
                         </span>
                       ))}
                     </div>
@@ -85,7 +85,7 @@ export default function ChatPanel() {
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-black text-white">
                   <Bot className="h-4 w-4" />
                 </div>
-                <div className="rounded-2xl px-4 py-3 text-[13px] leading-relaxed text-slate-500">正在调用模型...</div>
+                <div className="rounded-2xl px-4 py-3 text-[13px] leading-relaxed text-slate-500">正在查询图谱...</div>
               </div>
             )}
           </div>
@@ -112,7 +112,7 @@ export default function ChatPanel() {
               <button className="transition-colors hover:text-slate-800" aria-label="智能分析模式"><Sparkles className="h-[20px] w-[20px]" /></button>
               <button className="transition-colors hover:text-slate-800" aria-label="图谱搜索模式"><Search className="h-[20px] w-[20px]" /></button>
               <button className="transition-colors hover:text-slate-800" aria-label="架构推理模式"><Brain className="h-[20px] w-[20px]" /></button>
-              <button className="transition-colors hover:text-slate-800" aria-label="代码工具模式"><Hammer className="h-[20px] w-[20px]" /></button>
+              <button className="transition-colors hover:text-slate-800" aria-label="图谱问答模式"><Database className="h-[20px] w-[20px]" /></button>
             </div>
 
             <div className="flex items-center gap-2">
@@ -138,21 +138,20 @@ export default function ChatPanel() {
 }
 
 function toChatMessage(message: Message): ChatMessage {
-  // 前端用 agent 命名展示角色；API 仍按通用 LLM 协议传 assistant，避免泄露 UI 术语。
   return {
-    role: message.role === 'agent' ? 'assistant' : 'user',
+    role: message.role,
     content: message.content,
   };
 }
 
-function formatToolCall(toolCall: ApiToolCall): string {
-  const summaryKeys = ['query', 'node_id', 'path', 'direction'];
+function formatGraphRAGQuery(query: ApiGraphRAGQuery): string {
+  const summaryKeys = ['query', 'items'];
   const summary = summaryKeys
-    .map((key) => toolCall.args[key])
+    .map((key) => query.args[key])
     .find((value) => typeof value === 'string' && value.length > 0);
-  return summary ? `${toolCall.name}: ${summary}` : toolCall.name;
+  return summary ? `${query.name}: ${summary}` : query.name;
 }
 
-function formatToolArgs(args: Record<string, unknown>): string {
+function formatQueryArgs(args: Record<string, unknown>): string {
   return JSON.stringify(args);
 }

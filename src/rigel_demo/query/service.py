@@ -1,4 +1,4 @@
-"""Agent 与 Web 共用的图谱证据读取服务。"""
+"""Web 与 GraphRAG 辅助查询共用的图谱证据读取服务。"""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from rigel_demo.indexing.retrieval_summaries import RETRIEVAL_SUMMARY_PURPOSE
-from rigel_demo.storage.falkordb_store import FalkorDBConfig, FalkorDBStore
+from rigel_demo.project.summaries import RETRIEVAL_SUMMARY_PURPOSE
+from rigel_demo.storage.falkordb.store import FalkorDBConfig, FalkorDBStore
 
 DEFAULT_GRAPH_LIMIT = 500
 DEFAULT_RECALL_LIMIT = 8
@@ -261,9 +261,9 @@ class RigelGraphReader:
         expansion_limit: int,
         source_reader: RepositorySourceReader,
     ) -> dict[str, object]:
-        """组装 Agent 可直接引用的结构化图谱上下文。"""
+        """组装可直接引用的结构化图谱上下文。"""
 
-        # Agent 工具接口不生成自然语言答案，只返回可追溯的图谱证据和源码切片。
+        # 该接口不生成自然语言答案，只返回可追溯的图谱证据和源码切片。
         recall_results = self.recall(
             query_embedding,
             embedding_model=embedding_model,
@@ -327,6 +327,100 @@ class RigelGraphReader:
             edge_types=list(VISIBLE_EDGE_TYPES),
             limit=limit,
         )["relations"]
+
+    def neighbors(
+        self,
+        node_ids: list[str],
+        *,
+        direction: GraphExpansionDirection = "both",
+        edge_types: list[str] | None = None,
+        limit: int,
+    ) -> dict[str, list[dict[str, object]]]:
+        """按节点 ID 批量读取邻接关系。"""
+
+        if not node_ids:
+            return {}
+        normalized_edge_types = _visible_edge_types(edge_types or list(VISIBLE_EDGE_TYPES))
+        return {
+            node_id: self.expand_graph(
+                node_id=node_id,
+                direction=direction,
+                edge_types=normalized_edge_types,
+                limit=limit,
+            )["relations"]
+            for node_id in dict.fromkeys(node_ids)
+        }
+
+    def paths(
+        self,
+        *,
+        source_id: str,
+        target_id: str,
+        max_depth: int,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        """查找两个可视图节点之间的有向路径。"""
+
+        if max_depth < 1:
+            raise ValueError("max_depth 必须大于 0")
+        rows = self._query(
+            f"""
+            MATCH path = (source:RigelNode)-[*1..{max_depth}]->(target:RigelNode)
+            WHERE source.id = $source_id
+              AND target.id = $target_id
+              AND all(node IN nodes(path) WHERE node.rigel_type IN $visible_node_types)
+              AND all(edge IN relationships(path) WHERE type(edge) IN $visible_edge_types)
+            RETURN
+              [node IN nodes(path) | [node.id, properties(node)]],
+              [edge IN relationships(path) | [startNode(edge).id, endNode(edge).id, type(edge), properties(edge)]]
+            LIMIT $limit
+            """,
+            {
+                "source_id": source_id,
+                "target_id": target_id,
+                "visible_node_types": list(VISIBLE_NODE_TYPES),
+                "visible_edge_types": list(VISIBLE_EDGE_TYPES),
+                "limit": limit,
+            },
+        )
+        return [
+            {
+                "nodes": [_format_node(node_id, properties) for node_id, properties in node_rows],
+                "edges": [
+                    _format_edge(edge_source_id, edge_target_id, edge_type, properties)
+                    for edge_source_id, edge_target_id, edge_type, properties in edge_rows
+                ],
+            }
+            for node_rows, edge_rows in rows
+        ]
+
+    def auto_complete(self, query: str, *, limit: int) -> list[dict[str, object]]:
+        """按前缀搜索可视节点标签。"""
+
+        query_text = query.strip().lower()
+        if not query_text:
+            return []
+        rows = self._query(
+            """
+            MATCH (node:RigelNode)
+            WHERE node.rigel_type IN $visible_node_types
+              AND (
+                toLower(coalesce(node.name, '')) STARTS WITH $query
+                OR toLower(coalesce(node.display_name, '')) STARTS WITH $query
+                OR toLower(coalesce(node.qualified_name, '')) STARTS WITH $query
+                OR toLower(coalesce(node.relative_path, '')) STARTS WITH $query
+              )
+            RETURN node.id, properties(node)
+            ORDER BY coalesce(node.display_name, node.qualified_name, node.relative_path, node.name, node.id)
+            LIMIT $limit
+            """,
+            {
+                "query": query_text,
+                "visible_node_types": list(VISIBLE_NODE_TYPES),
+                "limit": limit,
+            },
+        )
+        return [_format_node(node_id, properties) for node_id, properties in rows]
 
     def expand_graph(
         self,

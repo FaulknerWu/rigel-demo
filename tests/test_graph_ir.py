@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest import TestCase
 
-from rigel_demo.core import EdgeType, GraphEdge
+from rigel_demo.graph import EdgeType, GraphEdge
 
 
 class GraphIRContractTest(TestCase):

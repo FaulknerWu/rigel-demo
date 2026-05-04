@@ -4,9 +4,9 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
-from rigel_demo.core import EdgeType, NodeType
+from rigel_demo.graph import EdgeType, NodeType
 from rigel_demo.embedding import EmbeddingConfig, EmbeddingFormat
-from rigel_demo.indexing import repository_indexer
+from rigel_demo.project import repository_indexer
 from rigel_demo.java.requests import DEFAULT_LSP_TIMEOUT_SECONDS, GENERATED_ZONE
 from rigel_demo.llm import LLMConfig, LLMConfigSection, LLMMessage
 

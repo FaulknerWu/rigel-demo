@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from rigel_demo.core.graph_ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType, Repository
+from rigel_demo.entities import Repository
+from rigel_demo.graph.ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType
 from rigel_demo.embedding import EmbeddingConfig, RigelEmbedding
-from rigel_demo.indexing.retrieval_summaries import (
+from rigel_demo.project.summaries import (
     SummaryEmbeddingClient,
     SummaryTextClient,
     attach_retrieval_summaries,

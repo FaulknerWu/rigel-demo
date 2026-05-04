@@ -19,8 +19,9 @@ from rigel_demo.cli import (
     init_repository,
     main,
 )
-from rigel_demo.core import EdgeType, GraphEdge, GraphIR, Module, Repository
-from rigel_demo.storage import FalkorDBConfig, FalkorDBStore
+from rigel_demo.entities import Module, Repository
+from rigel_demo.graph import EdgeType, GraphEdge, GraphIR
+from rigel_demo.storage.falkordb import FalkorDBConfig, FalkorDBStore
 
 
 class CliInitTest(TestCase):
@@ -35,6 +36,8 @@ class CliInitTest(TestCase):
             self.assertEqual(Path(result.config_path), config_path)
             self.assertEqual(json.loads(config_path.read_text(encoding="utf-8")), DEFAULT_CONFIG_DOCUMENT)
             self.assertFalse(database_artifact_exists(repository_path / ".rigel" / "falkordb.db"))
+            self.assertEqual(DEFAULT_CONFIG_DOCUMENT["graphrag"]["falkordb_host"], "127.0.0.1")
+            self.assertEqual(DEFAULT_CONFIG_DOCUMENT["graphrag"]["falkordb_port"], 6379)
 
     def test_init_repository_keeps_existing_config(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -74,7 +77,7 @@ class CliIndexTest(TestCase):
             config_path.write_text(json.dumps(DEFAULT_CONFIG_DOCUMENT, ensure_ascii=False) + "\n", encoding="utf-8")
             graph = _demo_graph()
 
-            with patch("rigel_demo.indexing.repository_indexer.index_repository") as index_repository:
+            with patch("rigel_demo.project.repository_indexer.index_repository") as index_repository:
                 index_repository.return_value = SimpleNamespace(graph=graph, indexed_file_count=1)
 
                 result = index_repository_workspace(repository_path)
@@ -103,7 +106,7 @@ class CliIndexTest(TestCase):
                 FalkorDBConfig(graph_name=DEFAULT_GRAPH_NAME, database_path=str(database_path))
             ).upsert_graph(_demo_graph())
 
-            with patch("rigel_demo.indexing.repository_indexer.index_repository_incremental") as index_repository_incremental:
+            with patch("rigel_demo.project.repository_indexer.index_repository_incremental") as index_repository_incremental:
                 index_repository_incremental.return_value = SimpleNamespace(
                     graph=GraphIR(),
                     added_files=["src/main/java/demo/Added.java"],
@@ -192,11 +195,13 @@ class CliWebConfigTest(TestCase):
                     return_value=FrontendBuildResult(success=True, static_path=static_path),
                 ),
                 patch("rigel_demo.cli.webbrowser.open") as open_browser,
+                patch("rigel_demo.web.app.create_app", return_value=object()) as create_app,
                 patch("uvicorn.run") as uvicorn_run,
             ):
                 exit_code = main(["web"])
 
         self.assertEqual(exit_code, 0)
+        create_app.assert_called_once_with(repository_path)
         open_browser.assert_not_called()
         self.assertEqual(uvicorn_run.call_args.kwargs["host"], "0.0.0.0")
         self.assertEqual(uvicorn_run.call_args.kwargs["port"], 8080)

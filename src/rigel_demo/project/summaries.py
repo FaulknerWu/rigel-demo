@@ -7,7 +7,8 @@ import json
 from collections.abc import Sequence
 from typing import Protocol, cast
 
-from rigel_demo.core.graph_ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType, Summary
+from rigel_demo.entities import Summary
+from rigel_demo.graph.ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType
 from rigel_demo.embedding import RigelEmbedding
 from rigel_demo.llm import LLMMessage, RigelLLM
 

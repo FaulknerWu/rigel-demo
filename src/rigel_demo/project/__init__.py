@@ -1,6 +1,6 @@
-"""仓库级代码图谱索引流程。"""
+"""全量索引与文件级增量索引。"""
 
-from rigel_demo.indexing.repository_indexer import (
+from rigel_demo.project.repository_indexer import (
     RepositoryIncrementalIndexResult,
     RepositoryIndexResult,
     index_repository,

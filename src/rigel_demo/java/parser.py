@@ -8,7 +8,8 @@ from typing import Literal
 
 from tree_sitter import Node, Parser
 
-from rigel_demo.core.graph_ir import Anchor, EdgeType, Entity, File, GraphEdge, GraphIR, Module, Repository
+from rigel_demo.entities import Anchor, Entity, File, Module, Repository
+from rigel_demo.graph.ir import EdgeType, GraphEdge, GraphIR
 from rigel_demo.java.language import BODY_NODE_KINDS, JAVA_LANGUAGE, METHOD_DECLARATION_KINDS, TREE_SITTER_PROVENANCE, TYPE_DECLARATION_KINDS
 from rigel_demo.java.requests import GENERATED_ZONE, JavaParseRequest
 from rigel_demo.java.source_utils import node_text, normalize_path, read_package_name
