@@ -20,6 +20,7 @@ from rigel_demo.llm import (
     LLMConfigurationError,
     LLMMessage,
 )
+from rigel_demo.agent.langgraph_agent import AgentReply, ToolCallTrace
 from rigel_demo.agent.service import RepositorySourceReader, SourceLineRangeError
 from rigel_demo.storage import FalkorDBConfig, FalkorDBStore
 from rigel_demo.web.app import create_app
@@ -51,22 +52,23 @@ class WebAppLLMTest(TestCase):
             )
 
             with self.assertRaisesRegex(EmbeddingConfigurationError, "embedding"):
-                create_app(repository_path, chat_client=_FakeRigelLLM())
+                create_app(repository_path, chat_client=_FakeGraphAgent())
 
-    def test_chat_uses_injected_llm_client(self) -> None:
-        fake_llm = _FakeRigelLLM()
+    def test_chat_uses_injected_agent_client(self) -> None:
+        fake_agent = _FakeGraphAgent()
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, chat_client=fake_llm, embedding_client=fake_embedding))
+            client = TestClient(create_app(repository_path, chat_client=fake_agent, embedding_client=fake_embedding))
 
             response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "PaymentService 做什么"}]})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["message"], {"role": "assistant", "content": "测试回复"})
-        self.assertIn("代码图谱搜索上下文", fake_llm.messages[0].content)
-        self.assertIn("PaymentService 做什么", fake_llm.messages[0].content)
+        payload = response.json()
+        self.assertEqual(payload["message"], {"role": "assistant", "content": "测试回复"})
+        self.assertEqual(payload["tool_calls"], [{"name": "recall", "args": {"query": "PaymentService 做什么"}}])
+        self.assertEqual(fake_agent.messages[0], LLMMessage(role="user", content="PaymentService 做什么"))
 
     def test_recall_uses_falkordb_vector_index(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
@@ -87,7 +89,7 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(summary_index[3]["embedding"]["similarityFunction"], "cosine")
         self.assertTrue(any(row[0].startswith("summary:") for row in vector_rows))
 
-    def test_agent_semantic_recall_returns_structured_context(self) -> None:
+    def test_tool_recall_returns_structured_context(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
@@ -95,7 +97,7 @@ class WebAppLLMTest(TestCase):
             client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
 
             response = client.post(
-                "/api/agent/tools/semantic_recall",
+                "/api/tools/recall",
                 json={"query": "PaymentService", "limit": 3, "expansion_limit": 2},
             )
 
@@ -108,7 +110,7 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(seed["anchors"][0]["role"], "definition")
         self.assertIn("class PaymentService", seed["source_slices"][0]["content"])
 
-    def test_agent_semantic_recall_rejects_invalid_limit(self) -> None:
+    def test_tool_recall_rejects_invalid_limit(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
@@ -116,14 +118,14 @@ class WebAppLLMTest(TestCase):
             client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
 
             response = client.post(
-                "/api/agent/tools/semantic_recall",
+                "/api/tools/recall",
                 json={"query": "PaymentService", "limit": 21},
             )
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("limit", response.json()["detail"])
 
-    def test_agent_get_node_anchors_returns_source_file_and_coordinates(self) -> None:
+    def test_tool_anchors_returns_source_file_and_coordinates(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
@@ -131,7 +133,7 @@ class WebAppLLMTest(TestCase):
             client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
 
             response = client.post(
-                "/api/agent/tools/get_node_anchors",
+                "/api/tools/anchors",
                 json={"node_id": "entity:demo:PaymentService"},
             )
 
@@ -141,7 +143,7 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(payload["source_file"]["relative_path"], "src/main/java/demo/PaymentService.java")
         self.assertEqual([anchor["role"] for anchor in payload["anchors"]], ["definition", "body"])
 
-    def test_agent_read_source_slice_truncates_by_max_lines(self) -> None:
+    def test_tool_source_truncates_by_max_lines(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
@@ -149,7 +151,7 @@ class WebAppLLMTest(TestCase):
             client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
 
             response = client.post(
-                "/api/agent/tools/read_source_slice",
+                "/api/tools/source",
                 json={
                     "path": "src/main/java/demo/PaymentService.java",
                     "start_line": 3,
@@ -184,7 +186,7 @@ class WebAppLLMTest(TestCase):
                     with self.assertRaisesRegex(SourceLineRangeError, "必须大于 0"):
                         source_reader.read_slice("Demo.java", **invalid_case)
 
-    def test_agent_read_source_slice_rejects_path_outside_repository(self) -> None:
+    def test_tool_source_rejects_path_outside_repository(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
@@ -192,14 +194,14 @@ class WebAppLLMTest(TestCase):
             client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
 
             response = client.post(
-                "/api/agent/tools/read_source_slice",
+                "/api/tools/source",
                 json={"path": "../secret.java", "start_line": 1, "end_line": 1},
             )
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("当前仓库内", response.json()["detail"])
 
-    def test_agent_expand_graph_returns_filtered_incoming_relations(self) -> None:
+    def test_tool_expand_returns_filtered_incoming_relations(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
@@ -207,7 +209,7 @@ class WebAppLLMTest(TestCase):
             client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
 
             response = client.post(
-                "/api/agent/tools/expand_graph",
+                "/api/tools/expand",
                 json={
                     "node_id": "entity:demo:PaymentService",
                     "direction": "incoming",
@@ -223,7 +225,7 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(graph["relations"][0]["edge"]["type"], "CONTAINS")
         self.assertEqual(graph["relations"][0]["node"]["type"], "File")
 
-    def test_agent_expand_graph_returns_404_for_unknown_node(self) -> None:
+    def test_tool_expand_returns_404_for_unknown_node(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
@@ -231,97 +233,56 @@ class WebAppLLMTest(TestCase):
             client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
 
             response = client.post(
-                "/api/agent/tools/expand_graph",
+                "/api/tools/expand",
                 json={"node_id": "entity:demo:Missing"},
             )
 
         self.assertEqual(response.status_code, 404)
         self.assertIn("未找到节点", response.json()["detail"])
 
-    def test_node_anchors_returns_source_file_and_anchor_coordinates(self) -> None:
-        fake_embedding = _FakeEmbeddingClient()
-        with TemporaryDirectory() as workspace:
-            repository_path = Path(workspace)
-            _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
-
-            response = client.get("/api/nodes/entity:demo:PaymentService/anchors")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["node"]["label"], "PaymentService")
-        self.assertEqual(payload["source_file"]["relative_path"], "src/main/java/demo/PaymentService.java")
-        self.assertEqual([anchor["role"] for anchor in payload["anchors"]], ["definition", "body"])
-
-    def test_source_returns_safe_repository_slice(self) -> None:
-        fake_embedding = _FakeEmbeddingClient()
-        with TemporaryDirectory() as workspace:
-            repository_path = Path(workspace)
-            _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
-
-            response = client.get(
-                "/api/source",
-                params={
-                    "path": "src/main/java/demo/PaymentService.java",
-                    "start_line": "3",
-                    "end_line": "5",
-                },
+    def test_chat_returns_agent_tool_trace_when_graph_exists(self) -> None:
+        fake_agent = _FakeGraphAgent(
+            AgentReply(
+                content="PaymentService 处理付款流程",
+                tool_calls=[
+                    ToolCallTrace(name="recall", args={"query": "PaymentService 做什么"}),
+                    ToolCallTrace(
+                        name="source",
+                        args={
+                            "path": "src/main/java/demo/PaymentService.java",
+                            "start_line": 3,
+                            "end_line": 5,
+                        },
+                    ),
+                ],
             )
-
-        self.assertEqual(response.status_code, 200)
-        source = response.json()["source"]
-        self.assertEqual(source["source_file"]["relative_path"], "src/main/java/demo/PaymentService.java")
-        self.assertEqual(source["start_line"], 3)
-        self.assertEqual(source["end_line"], 5)
-        self.assertIn("class PaymentService", source["content"])
-
-    def test_source_rejects_path_outside_repository(self) -> None:
+        )
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
-
-            response = client.get(
-                "/api/source",
-                params={
-                    "path": "../secret.java",
-                    "start_line": "1",
-                    "end_line": "1",
-                },
-            )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("当前仓库内", response.json()["detail"])
-
-    def test_chat_attaches_vector_recall_context_when_graph_exists(self) -> None:
-        fake_llm = _FakeRigelLLM()
-        fake_embedding = _FakeEmbeddingClient()
-        with TemporaryDirectory() as workspace:
-            repository_path = Path(workspace)
-            _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, chat_client=fake_llm, embedding_client=fake_embedding))
+            client = TestClient(create_app(repository_path, chat_client=fake_agent, embedding_client=fake_embedding))
 
             response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "PaymentService 做什么"}]})
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("代码图谱搜索上下文", fake_llm.messages[0].content)
-        self.assertIn("向量分数", fake_llm.messages[0].content)
-        self.assertIn("PaymentService", fake_llm.messages[0].content)
+        payload = response.json()
+        self.assertEqual(payload["message"]["content"], "PaymentService 处理付款流程")
+        self.assertEqual([tool_call["name"] for tool_call in payload["tool_calls"]], ["recall", "source"])
 
-    def test_chat_does_not_attach_keyword_context_when_vector_recall_is_empty(self) -> None:
-        fake_llm = _FakeRigelLLM()
+    def test_chat_keeps_raw_messages_for_agent(self) -> None:
+        fake_agent = _FakeGraphAgent(AgentReply(content="没有找到确定证据", tool_calls=[]))
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, chat_client=fake_llm, embedding_client=fake_embedding))
+            client = TestClient(create_app(repository_path, chat_client=fake_agent, embedding_client=fake_embedding))
 
             response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "NoMatch"}]})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(fake_llm.messages[0], LLMMessage(role="user", content="NoMatch"))
+        self.assertEqual(response.json()["tool_calls"], [])
+        self.assertEqual(fake_agent.messages[0], LLMMessage(role="user", content="NoMatch"))
 
     def test_incremental_index_endpoint_returns_shared_result_payload(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
@@ -505,8 +466,8 @@ def _demo_llm_config(system_prompt: str) -> dict[str, object]:
     }
 
 
-class _FakeRigelLLM:
-    def __init__(self) -> None:
+class _FakeGraphAgent:
+    def __init__(self, reply: AgentReply | None = None) -> None:
         self.config = LLMConfig(
             provider="openai",
             model="fake-model",
@@ -517,10 +478,14 @@ class _FakeRigelLLM:
             section=LLMConfigSection.CHAT,
         )
         self.messages: list[LLMMessage] = []
+        self.reply = reply or AgentReply(
+            content="测试回复",
+            tool_calls=[ToolCallTrace(name="recall", args={"query": "PaymentService 做什么"})],
+        )
 
-    def generate_reply(self, messages: list[LLMMessage]) -> str:
+    def generate_reply(self, messages: list[LLMMessage]) -> AgentReply:
         self.messages = messages
-        return "测试回复"
+        return self.reply
 
 
 class _FakeEmbeddingClient:

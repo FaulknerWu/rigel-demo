@@ -64,9 +64,10 @@ uv run rigel web
 - `summary`: `rigel index` 生成 `Summary.text` 使用的生成模型。
 - `embedding`: `rigel index` 写入 Summary 向量、Web 召回查询向量使用的嵌入模型。
 
-`chat` 与 `summary` 都复用同一套 LLM 客户端字段，当前只调用
-OpenAI-compatible Chat Completions API。`provider` 是提供商名称，两个功能可以配置
-不同的模型、密钥、Base URL 与生成参数。
+`chat` 与 `summary` 都复用同一套 LLM 客户端字段。`summary` 使用
+OpenAI-compatible Chat Completions API；`chat` 通过 LangChain/LangGraph Agent
+调用支持工具调用的 OpenAI-compatible Chat 模型。`provider` 是提供商名称，两个功能
+可以配置不同的模型、密钥、Base URL 与生成参数。
 
 ```json
 {
@@ -152,7 +153,7 @@ RETURN entity.qualified_name, target.qualified_name
 边连接到被描述的图谱节点。`Summary.summary_model` 和 `Summary.embedding_model`
 会分别记录两类模型名称。
 
-Web 后端通过 `/api/agent/tools/semantic_recall` 暴露结构化召回上下文，流程为：
+Web 后端通过 `/api/tools/recall` 暴露结构化召回上下文，流程为：
 
 1. 将用户问题映射到同一套本地向量空间。
 2. 通过 FalkorDB 原生向量索引查询 `Summary.embedding`，得到召回种子。
@@ -160,20 +161,22 @@ Web 后端通过 `/api/agent/tools/semantic_recall` 暴露结构化召回上下�
 4. 沿 `CONTAINS`、`DEPENDS_ON`、`SPECIALIZES`、`ALIASES` 补充一跳上下文。
 5. 结合源码锚点读取少量安全源码切片，作为 Agent 可引用的证据。
 
-`/api/chat` 使用这条向量召回链路组装代码图谱上下文；召回为空时直接保留原始对话消息。
+`/api/chat` 不再固定拼接召回上下文，而是通过 LangChain/LangGraph Agent 自由调度
+`recall`、`anchors`、`source`、`expand` 这些只读工具。Chat 响应会返回
+`tool_calls`，前端聊天面板会展示本轮回答实际调用过的工具。
 
 Web 图谱面板右下角的增量刷新按钮会调用 `/api/index/incremental`，等价于在当前仓库执行
 `rigel index --incremental`，成功后重新加载图谱并展示新增、修改、删除、跳过文件等统计。
 
 ## Agent REST 工具接口
 
-Web 后端额外暴露一组只读 Agent 工具接口，供外部 Agent 复用同一份 `.rigel`
-索引产物。接口只返回结构化图谱证据与源码片段，不负责调用 Chat 模型生成回答。
+Web 后端额外暴露一组只读工具接口，供外部 Agent 复用同一份 `.rigel`
+索引产物。接口只返回结构化图谱证据与源码片段；Web Chat 内部也复用同一组工具能力。
 
-- `POST /api/agent/tools/semantic_recall`：输入 `query`、`limit`、`expansion_limit`，返回向量召回种子、摘要、相关一跳关系、源码文件、锚点和少量源码切片。
-- `POST /api/agent/tools/get_node_anchors`：输入 `node_id`，返回节点详情、所属源码文件与全部锚点坐标。
-- `POST /api/agent/tools/read_source_slice`：输入 `path`、`start_line`、`end_line`、可选 `max_lines`，读取已索引源码文件的安全行号切片。
-- `POST /api/agent/tools/expand_graph`：输入 `node_id`、`direction`、`edge_types`、`limit`，返回指定节点的一跳局部图关系。
+- `POST /api/tools/recall`：输入 `query`、`limit`、`expansion_limit`，返回向量召回种子、摘要、相关一跳关系、源码文件、锚点和少量源码切片。
+- `POST /api/tools/anchors`：输入 `node_id`，返回节点详情、所属源码文件与全部锚点坐标。
+- `POST /api/tools/source`：输入 `path`、`start_line`、`end_line`、可选 `max_lines`，读取已索引源码文件的安全行号切片。
+- `POST /api/tools/expand`：输入 `node_id`、`direction`、`edge_types`、`limit`，返回指定节点的一跳局部图关系。
 
 这些接口复用 CLI 写入的 `.rigel/rigel.json` 和 `.rigel/falkordb.db`，因此使用前仍需先执行
 `rigel init`、填写配置并完成 `rigel index`。

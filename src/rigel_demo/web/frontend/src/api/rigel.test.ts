@@ -1,5 +1,15 @@
 import assert from 'node:assert/strict';
-import { adaptGraph, adaptIndexResult, adaptNode, adaptSummary, type ApiGraph, type ApiIndexResult, type ApiNode, type ApiSummary } from './rigel';
+import {
+  adaptGraph,
+  adaptIndexResult,
+  adaptNode,
+  adaptSummary,
+  type ApiChatResponse,
+  type ApiGraph,
+  type ApiIndexResult,
+  type ApiNode,
+  type ApiSummary,
+} from './rigel';
 
 const apiNode: ApiNode = {
   id: 'node-1',
@@ -76,3 +86,12 @@ assert.deepEqual(indexResult.addedFiles, ['src/main/java/demo/Added.java']);
 assert.equal(indexResult.modifiedFiles.length, 1);
 assert.equal(indexResult.skippedFileCount, 2);
 assert.equal(indexResult.graphEdgeCount, 24);
+
+const chatResponse: ApiChatResponse = {
+  status: 'success',
+  message: { role: 'assistant', content: 'PaymentService 处理付款流程' },
+  tool_calls: [{ name: 'recall', args: { query: 'PaymentService' } }],
+  model: 'gpt-5.2',
+  provider: 'openai',
+};
+assert.equal(chatResponse.tool_calls[0].name, 'recall');

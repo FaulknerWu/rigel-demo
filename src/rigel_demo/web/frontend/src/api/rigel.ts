@@ -46,9 +46,15 @@ export interface ApiChatMessage {
   content: string;
 }
 
+export interface ApiToolCall {
+  name: string;
+  args: Record<string, unknown>;
+}
+
 export interface ApiChatResponse {
   status: string;
   message: ApiChatMessage;
+  tool_calls: ApiToolCall[];
   model: string;
   provider: string;
 }
@@ -100,6 +106,11 @@ export interface GraphSummary {
 
 export type ChatMessage = ApiChatMessage;
 
+export interface ChatResponse {
+  message: ChatMessage;
+  toolCalls: ApiToolCall[];
+}
+
 export interface IndexResult {
   mode: string;
   modeLabel: string;
@@ -142,7 +153,7 @@ export async function fetchSummary(): Promise<GraphSummary> {
   return adaptSummary(payload.summary);
 }
 
-export async function sendChatMessage(messages: ChatMessage[]): Promise<ChatMessage> {
+export async function sendChatMessage(messages: ChatMessage[]): Promise<ChatResponse> {
   const response = await fetch('/api/chat', {
     method: 'POST',
     headers: {
@@ -151,7 +162,10 @@ export async function sendChatMessage(messages: ChatMessage[]): Promise<ChatMess
     body: JSON.stringify({ messages }),
   });
   const payload = await readJson<ApiChatResponse>(response);
-  return payload.message;
+  return {
+    message: payload.message,
+    toolCalls: payload.tool_calls,
+  };
 }
 
 export async function runIncrementalIndex(): Promise<IndexResult> {

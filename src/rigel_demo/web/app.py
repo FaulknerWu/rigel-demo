@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import json
 from pathlib import Path
 from threading import Lock
@@ -36,6 +35,11 @@ from rigel_demo.agent.service import (
     SourcePathError,
     SourceReadError,
 )
+from rigel_demo.agent.langgraph_agent import (
+    CodeGraphAgentError,
+    CodeGraphAgentRunner,
+    LangGraphCodeAgent,
+)
 from rigel_demo.embedding import (
     EmbeddingConfig,
     EmbeddingRequestError,
@@ -46,12 +50,9 @@ from rigel_demo.llm import (
     LLMConfig,
     LLMConfigSection,
     LLMMessage,
-    LLMRequestError,
     LLMResponseError,
-    RigelLLM,
 )
 
-DEFAULT_CHAT_CONTEXT_LIMIT = 8
 MAX_AGENT_RECALL_LIMIT = 20
 MAX_AGENT_EXPANSION_LIMIT = 10
 MAX_AGENT_SOURCE_SLICE_LINES = 300
@@ -62,7 +63,7 @@ MAX_AGENT_EXPAND_LIMIT = 100
 def create_app(
     repository_path: Path | None = None,
     *,
-    chat_client: RigelLLM | None = None,
+    chat_client: CodeGraphAgentRunner | None = None,
     embedding_client: RigelEmbedding | None = None,
 ) -> FastAPI:
     """创建基于当前仓库 `.rigel` 目录的 Web 演示应用。"""
@@ -77,8 +78,14 @@ def create_app(
     graph_name = _read_graph_name(state_path)
     graph_reader = RigelGraphReader(database_path=database_path, graph_name=graph_name)
     source_reader = RepositorySourceReader(resolved_repository_path)
-    active_chat_client = _resolve_chat_client(resolved_repository_path, chat_client)
     active_embedding_client = _resolve_embedding_client(resolved_repository_path, embedding_client)
+    active_chat_client = _resolve_chat_client(
+        resolved_repository_path,
+        chat_client,
+        graph_reader=graph_reader,
+        source_reader=source_reader,
+        embedding_client=active_embedding_client,
+    )
     incremental_index_lock = Lock()
 
     app = FastAPI(title="Rigel Demo", version="0.1.0")
@@ -115,54 +122,9 @@ def create_app(
             raise HTTPException(status_code=400, detail="limit 必须大于 0")
         return {"status": "success", "graph": graph_reader.graph(limit=limit)}
 
-    @app.get("/api/nodes/{node_id:path}/anchors")
-    def node_anchors(node_id: str) -> dict[str, object]:
-        """返回指定图谱节点的源码锚点。"""
-
-        _ensure_database_exists(database_path)
-        result = graph_reader.anchors_for_node(node_id)
-        if result is None:
-            raise HTTPException(status_code=404, detail=f"未找到节点：{node_id}")
-        return {"status": "success", **result}
-
-    @app.get("/api/source")
-    def source(path: str, start_line: int, end_line: int) -> dict[str, object]:
-        """读取已索引源码文件的安全行号切片。"""
-
-        _ensure_database_exists(database_path)
-        try:
-            normalized_path = source_reader.normalize_relative_path(path)
-        except SourcePathError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-
-        source_file = graph_reader.source_file(normalized_path)
-        if source_file is None:
-            raise HTTPException(status_code=404, detail=f"未找到已索引源码文件：{normalized_path}")
-
-        try:
-            source_slice = source_reader.read_slice(
-                normalized_path,
-                start_line=start_line,
-                end_line=end_line,
-            )
-        except SourceLineRangeError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-        except SourceFileNotFoundError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except SourceReadError as error:
-            raise HTTPException(status_code=500, detail=str(error)) from error
-
-        return {
-            "status": "success",
-            "source": {
-                **source_slice,
-                "source_file": source_file,
-            },
-        }
-
-    @app.post("/api/agent/tools/semantic_recall")
-    def agent_semantic_recall(request: AgentSemanticRecallRequest) -> dict[str, object]:
-        """Agent 工具：基于自然语言问题召回图谱证据上下文。"""
+    @app.post("/api/tools/recall")
+    def tool_recall(request: AgentSemanticRecallRequest) -> dict[str, object]:
+        """工具：基于自然语言问题召回图谱证据上下文。"""
 
         _ensure_database_exists(database_path)
         query = request.query.strip()
@@ -187,9 +149,9 @@ def create_app(
             ),
         }
 
-    @app.post("/api/agent/tools/get_node_anchors")
-    def agent_get_node_anchors(request: AgentNodeAnchorsRequest) -> dict[str, object]:
-        """Agent 工具：读取指定图谱节点的源码锚点。"""
+    @app.post("/api/tools/anchors")
+    def tool_anchors(request: AgentNodeAnchorsRequest) -> dict[str, object]:
+        """工具：读取指定图谱节点的源码锚点。"""
 
         _ensure_database_exists(database_path)
         result = graph_reader.anchors_for_node(request.node_id)
@@ -197,9 +159,9 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"未找到节点：{request.node_id}")
         return {"status": "success", **result}
 
-    @app.post("/api/agent/tools/read_source_slice")
-    def agent_read_source_slice(request: AgentSourceSliceRequest) -> dict[str, object]:
-        """Agent 工具：读取已索引源码文件的安全行号切片。"""
+    @app.post("/api/tools/source")
+    def tool_source(request: AgentSourceSliceRequest) -> dict[str, object]:
+        """工具：读取已索引源码文件的安全行号切片。"""
 
         _ensure_database_exists(database_path)
         _ensure_agent_range(request.max_lines, "max_lines", minimum=1, maximum=MAX_AGENT_SOURCE_SLICE_LINES)
@@ -234,9 +196,9 @@ def create_app(
             },
         }
 
-    @app.post("/api/agent/tools/expand_graph")
-    def agent_expand_graph(request: AgentExpandGraphRequest) -> dict[str, object]:
-        """Agent 工具：读取指定节点的一跳局部图关系。"""
+    @app.post("/api/tools/expand")
+    def tool_expand(request: AgentExpandGraphRequest) -> dict[str, object]:
+        """工具：读取指定节点的一跳局部图关系。"""
 
         _ensure_database_exists(database_path)
         _ensure_agent_range(request.limit, "limit", minimum=1, maximum=MAX_AGENT_EXPAND_LIMIT)
@@ -287,21 +249,21 @@ def create_app(
             raise HTTPException(status_code=400, detail="最后一条消息必须来自用户")
 
         try:
-            # 只增强最后一条用户问题，保留原始对话历史，避免把检索上下文重复塞进多轮消息。
-            enriched_messages = _attach_graph_context(
-                messages,
-                graph_reader=graph_reader,
-                embedding_client=active_embedding_client,
-            )
-            reply = active_chat_client.generate_reply(enriched_messages)
+            agent_reply = active_chat_client.generate_reply(messages)
         except (EmbeddingRequestError, EmbeddingResponseError) as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
-        except (LLMRequestError, LLMResponseError) as error:
+        except CodeGraphAgentError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        except LLMResponseError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
 
         return {
             "status": "success",
-            "message": {"role": "assistant", "content": reply},
+            "message": {"role": "assistant", "content": agent_reply.content},
+            "tool_calls": [
+                {"name": tool_call.name, "args": tool_call.args}
+                for tool_call in agent_reply.tool_calls
+            ],
             "model": active_chat_client.config.model,
             "provider": active_chat_client.config.provider,
         }
@@ -391,11 +353,23 @@ def _ensure_agent_edge_types(edge_types: list[str]) -> None:
         raise HTTPException(status_code=400, detail=f"不支持的 edge_types：{', '.join(invalid_edge_types)}")
 
 
-def _resolve_chat_client(repository_path: Path, provided_client: RigelLLM | None) -> RigelLLM:
+def _resolve_chat_client(
+    repository_path: Path,
+    provided_client: CodeGraphAgentRunner | None,
+    *,
+    graph_reader: RigelGraphReader,
+    source_reader: RepositorySourceReader,
+    embedding_client: RigelEmbedding,
+) -> CodeGraphAgentRunner:
     if provided_client is not None:
         return provided_client
 
-    return RigelLLM(LLMConfig.from_repository(repository_path, LLMConfigSection.CHAT))
+    return LangGraphCodeAgent(
+        config=LLMConfig.from_repository(repository_path, LLMConfigSection.CHAT),
+        graph_reader=graph_reader,
+        source_reader=source_reader,
+        embedding_client=embedding_client,
+    )
 
 
 def _resolve_embedding_client(
@@ -408,7 +382,7 @@ def _resolve_embedding_client(
     return RigelEmbedding(EmbeddingConfig.from_repository(repository_path))
 
 
-def _llm_status(llm_client: RigelLLM) -> dict[str, object]:
+def _llm_status(llm_client: CodeGraphAgentRunner) -> dict[str, object]:
     config = llm_client.config
     return {
         "configured": True,
@@ -437,55 +411,3 @@ def _to_llm_messages(messages: list[ChatMessagePayload]) -> list[LLMMessage]:
         for message in messages
         if message.content.strip()
     ]
-
-
-def _attach_graph_context(
-    messages: list[LLMMessage],
-    *,
-    graph_reader: RigelGraphReader,
-    embedding_client: RigelEmbedding,
-) -> list[LLMMessage]:
-    context = _build_graph_context(messages[-1].content, graph_reader=graph_reader, embedding_client=embedding_client)
-    if not context:
-        return messages
-
-    # 把检索结果写入用户问题前缀，让所有提供商都能通过普通文本获得同一份图谱上下文。
-    contextualized_latest_message = LLMMessage(
-        role="user",
-        content=f"代码图谱搜索上下文：\n{context}\n\n用户问题：\n{messages[-1].content}",
-    )
-    return [*messages[:-1], contextualized_latest_message]
-
-
-def _build_graph_context(
-    query: str,
-    *,
-    graph_reader: RigelGraphReader,
-    embedding_client: RigelEmbedding,
-) -> str:
-    query_embedding = embedding_client.embed_query(query)
-    recall_results = graph_reader.recall(
-        query_embedding,
-        embedding_model=embedding_client.config.model,
-        limit=DEFAULT_CHAT_CONTEXT_LIMIT,
-        expansion_limit=DEFAULT_RECALL_EXPANSION_LIMIT,
-    )
-    return _format_recall_context(recall_results)
-
-
-def _format_recall_context(recall_results: list[dict[str, object]]) -> str:
-    lines: list[str] = []
-    for index, result in enumerate(recall_results, start=1):
-        node = cast(Mapping[str, object], result["node"])
-        summary = cast(Mapping[str, object], result["summary"])
-        score = cast(float, result["score"])
-        lines.append(
-            f"{index}. {node['label']}（{node['type']}，向量分数 {score:.3f}）：{summary['text']}"
-        )
-        for related in cast(list[dict[str, object]], result["related"]):
-            related_node = cast(Mapping[str, object], related["node"])
-            edge = cast(Mapping[str, object], related["edge"])
-            lines.append(
-                f"   - {related['direction']} {edge['type']} {related_node['label']}（{related_node['type']}）"
-            )
-    return "\n".join(lines)

@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { ArrowUp, Bot, Brain, Hammer, Plus, Search, Sparkles, User } from 'lucide-react';
-import { sendChatMessage, type ChatMessage } from '../api/rigel';
+import { sendChatMessage, type ApiToolCall, type ChatMessage } from '../api/rigel';
 
 interface Message {
   role: 'user' | 'agent';
   content: string;
+  toolCalls?: ApiToolCall[];
 }
 
 export default function ChatPanel() {
@@ -23,8 +24,11 @@ export default function ChatPanel() {
     setIsResponding(true);
 
     try {
-      const responseMessage = await sendChatMessage(nextMessages.map(toChatMessage));
-      setMessages((currentMessages) => [...currentMessages, { role: 'agent', content: responseMessage.content }]);
+      const response = await sendChatMessage(nextMessages.map(toChatMessage));
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        { role: 'agent', content: response.message.content, toolCalls: response.toolCalls },
+      ]);
     } catch (error) {
       const message = error instanceof Error ? error.message : '请求失败';
       setMessages((currentMessages) => [...currentMessages, { role: 'agent', content: `未能完成模型调用：${message}` }]);
@@ -56,6 +60,20 @@ export default function ChatPanel() {
                   {message.role === 'user' ? <User className="h-4 w-4 text-slate-500" /> : <Bot className="h-4 w-4" />}
                 </div>
                 <div className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
+                  {message.role === 'agent' && message.toolCalls && message.toolCalls.length > 0 && (
+                    <div className="mb-2 flex max-w-[280px] flex-wrap gap-1.5">
+                      {message.toolCalls.map((toolCall, toolIndex) => (
+                        <span
+                          key={`${toolCall.name}-${toolIndex}`}
+                          className="inline-flex max-w-full items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-600"
+                          title={formatToolArgs(toolCall.args)}
+                        >
+                          <Hammer className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{formatToolCall(toolCall)}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <div className={`max-w-[280px] whitespace-pre-wrap rounded-2xl px-4 py-3 text-[13px] leading-relaxed ${message.role === 'user' ? 'bg-slate-100 text-slate-900' : 'bg-transparent text-slate-800'}`}>
                     {message.content}
                   </div>
@@ -125,4 +143,16 @@ function toChatMessage(message: Message): ChatMessage {
     role: message.role === 'agent' ? 'assistant' : 'user',
     content: message.content,
   };
+}
+
+function formatToolCall(toolCall: ApiToolCall): string {
+  const summaryKeys = ['query', 'node_id', 'path', 'direction'];
+  const summary = summaryKeys
+    .map((key) => toolCall.args[key])
+    .find((value) => typeof value === 'string' && value.length > 0);
+  return summary ? `${toolCall.name}: ${summary}` : toolCall.name;
+}
+
+function formatToolArgs(args: Record<string, unknown>): string {
+  return JSON.stringify(args);
 }
