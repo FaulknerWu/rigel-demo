@@ -112,6 +112,17 @@ class Entity:
     origin: Literal["internal", "external", "generated"]
     semantic_hash: str
 
+    def __post_init__(self) -> None:
+        _require_non_empty_string(self.entity_id, "Entity.entity_id")
+        _require_non_empty_string(self.entity_key, "Entity.entity_key")
+        _require_non_empty_string(self.display_name, "Entity.display_name")
+        _require_non_empty_string(self.qualified_name, "Entity.qualified_name")
+        _require_non_empty_string(self.kind_norm, "Entity.kind_norm")
+        _require_non_empty_string(self.kind_raw, "Entity.kind_raw")
+        _require_non_empty_string(self.semantic_hash, "Entity.semantic_hash")
+        if self.origin not in {"internal", "external", "generated"}:
+            raise ValueError("Entity.origin 必须是 internal、external 或 generated")
+
     def to_node(self) -> GraphNode:
         return GraphNode(
             id=self.entity_id,
@@ -171,6 +182,9 @@ class GraphEdge:
     target_id: str
     properties: JsonObject = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        _edge_semantic_suffix(self.properties)
+
     @classmethod
     def create(
         cls,
@@ -205,6 +219,7 @@ class GraphEdge:
             properties=edge_properties,
         )
 
+
 @dataclass(slots=True)
 class GraphIR:
     """图谱中间表示根对象。
@@ -231,5 +246,21 @@ def _dataclass_properties(model: object) -> JsonObject:
 def _edge_id(edge_type: EdgeType, source_id: str, target_id: str, properties: JsonObject) -> str:
     """生成可读且语义稳定的边 ID。"""
 
-    semantic_suffix = properties.get("kind") or properties.get("role") or "default"
+    semantic_suffix = _edge_semantic_suffix(properties)
     return f"{edge_type.value}:{source_id}:{target_id}:{semantic_suffix}"
+
+
+def _edge_semantic_suffix(properties: JsonObject) -> str:
+    for property_name in ("kind", "role"):
+        value = properties.get(property_name)
+        if value is None:
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        raise ValueError(f"GraphEdge.{property_name} 必须是非空字符串")
+    raise ValueError("GraphEdge 必须包含非空 kind 或 role")
+
+
+def _require_non_empty_string(value: str, field_name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} 必须是非空字符串")

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
-from typing import Protocol
+from collections.abc import Sequence
+from typing import Protocol, cast
 
 from rigel_demo.core.graph_ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType, Summary
 from rigel_demo.embedding import RigelEmbedding
@@ -59,6 +59,7 @@ def attach_retrieval_summaries(
         if node.type in _SUMMARY_TARGET_TYPES
         and (target_node_ids is None or node.id in target_node_ids)
     ]
+    # 先生成全部摘要文本再批量 Embedding，减少外部模型调用次数并保持结果顺序可校验。
     summary_texts = [
         _generate_summary_text(target_node, summary_client=summary_client)
         for target_node in target_nodes
@@ -147,25 +148,25 @@ def _local_summary_text(target_node: GraphNode) -> str:
     if target_node.type == NodeType.ENTITY:
         return _join_summary_parts(
             target_node.type.value,
-            _read_string(properties, "kind_norm"),
-            _read_string(properties, "display_name"),
-            _read_string(properties, "qualified_name"),
-            _read_string(properties, "kind_raw"),
+            cast(str, properties["kind_norm"]),
+            cast(str, properties["display_name"]),
+            cast(str, properties["qualified_name"]),
+            cast(str, properties["kind_raw"]),
         )
     if target_node.type == NodeType.FILE:
         return _join_summary_parts(
             target_node.type.value,
-            _read_string(properties, "language"),
-            _read_string(properties, "relative_path"),
-            _read_string(properties, "zone"),
+            cast(str, properties["language"]),
+            cast(str, properties["relative_path"]),
+            cast(str, properties["zone"]),
         )
     if target_node.type == NodeType.MODULE:
         return _join_summary_parts(
             target_node.type.value,
-            _read_string(properties, "name"),
-            _read_string(properties, "root_path"),
-            _read_string(properties, "ecosystem"),
-            _read_string(properties, "zone"),
+            cast(str, properties["name"]),
+            cast(str, properties["root_path"]),
+            cast(str, properties["ecosystem"]),
+            cast(str, properties["zone"]),
         )
     return _join_summary_parts(target_node.type.value, target_node.id)
 
@@ -173,8 +174,9 @@ def _local_summary_text(target_node: GraphNode) -> str:
 def _source_hash(target_node: GraphNode, text: str) -> str:
     for property_name in ("semantic_hash", "content_hash"):
         value = target_node.properties.get(property_name)
-        if isinstance(value, str) and value:
-            return value
+        if value:
+            # Entity/File 已有内容哈希时直接继承，方便后续判断摘要是否跟随源码变化。
+            return cast(str, value)
 
     source = f"{target_node.id}\n{text}".encode("utf-8")
     return f"{SUMMARY_SOURCE_HASH_PREFIX}{hashlib.sha256(source).hexdigest()}"
@@ -182,8 +184,3 @@ def _source_hash(target_node: GraphNode, text: str) -> str:
 
 def _join_summary_parts(*parts: str) -> str:
     return " ".join(part for part in parts if part)
-
-
-def _read_string(properties: Mapping[str, object], name: str) -> str:
-    value = properties.get(name)
-    return value if isinstance(value, str) else ""

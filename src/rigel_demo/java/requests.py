@@ -9,6 +9,7 @@ DEFAULT_MODULE_ECOSYSTEM = "maven"
 DEFAULT_ZONE = "prod"
 GENERATED_ZONE = "generated"
 DEFAULT_LSP_TIMEOUT_SECONDS = 60
+JAVA_ZONE_VALUES = {"prod", "test", "tooling", "vendor", GENERATED_ZONE}
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +25,25 @@ class JavaParseRequest:
     module_root_path: str = "."
     module_ecosystem: str = DEFAULT_MODULE_ECOSYSTEM
     zone: str = DEFAULT_ZONE
-    file_zone: str | None = None
+    file_zone: str = DEFAULT_ZONE
+
+    def __post_init__(self) -> None:
+        required_fields = (
+            "repository_name",
+            "module_name",
+            "module_root_path",
+            "module_ecosystem",
+            "zone",
+            "file_zone",
+        )
+        for field_name in required_fields:
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"JavaParseRequest.{field_name} 必须是非空字符串")
+        for field_name in ("zone", "file_zone"):
+            if getattr(self, field_name) not in JAVA_ZONE_VALUES:
+                supported_values = "、".join(sorted(JAVA_ZONE_VALUES))
+                raise ValueError(f"JavaParseRequest.{field_name} 仅支持：{supported_values}")
 
 
 @dataclass(frozen=True, slots=True)

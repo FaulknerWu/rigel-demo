@@ -72,8 +72,8 @@ class FalkorDBStore:
         ).result_set
         file_hashes: dict[str, str] = {}
         for relative_path, content_hash in rows:
-            if isinstance(relative_path, str) and isinstance(content_hash, str):
-                file_hashes[relative_path] = content_hash
+            normalized_path = _database_string(relative_path, "File.relative_path")
+            file_hashes[normalized_path] = _database_string(content_hash, "File.content_hash")
         return file_hashes
 
     def delete_file_subgraphs(self, relative_paths: list[str]) -> int:
@@ -98,7 +98,7 @@ class FalkorDBStore:
             """,
             parameters,
         ).result_set
-        node_count = int(deleted_count[0][0]) if deleted_count else 0
+        node_count = int(deleted_count[0][0])
 
         self._graph.query(
             """
@@ -122,8 +122,8 @@ class FalkorDBStore:
 
         node_rows = self._graph.query("MATCH (node:RigelNode) RETURN count(node)").result_set
         edge_rows = self._graph.query("MATCH (:RigelNode)-[edge]->(:RigelNode) RETURN count(edge)").result_set
-        node_count = int(node_rows[0][0]) if node_rows else 0
-        edge_count = int(edge_rows[0][0]) if edge_rows else 0
+        node_count = int(node_rows[0][0])
+        edge_count = int(edge_rows[0][0])
         return node_count, edge_count
 
     def upsert_node(self, node: GraphNode) -> None:
@@ -137,6 +137,7 @@ class FalkorDBStore:
         }
         native_embedding = _summary_embedding(raw_properties) if node_type == SUMMARY_NODE_LABEL else None
         if native_embedding is not None:
+            # 向量字段必须以 FalkorDB vecf32 写入；不能走通用属性序列化，否则原生向量索引用不了。
             raw_properties = dict(raw_properties)
             raw_properties.pop(SUMMARY_EMBEDDING_PROPERTY, None)
 
@@ -222,8 +223,6 @@ class FalkorDBStore:
             if not _embedding_has_vector_index(index_types):
                 continue
             embedding_options = _embedding_index_options(options)
-            if not embedding_options:
-                return True
             indexed_dimensions = embedding_options.get("dimension")
             similarity_function = embedding_options.get("similarityFunction")
             if indexed_dimensions == dimensions and similarity_function == SUMMARY_VECTOR_SIMILARITY_FUNCTION:
@@ -275,6 +274,7 @@ def _graph_summary_embedding_dimensions(graph_ir: GraphIR) -> int | None:
     if not dimensions:
         return None
     if len(dimensions) > 1:
+        # FalkorDB 同一个向量索引只能有固定维度，混用模型配置必须尽早失败。
         raise ValueError("同一图谱中的 Summary.embedding 维度必须一致")
     return next(iter(dimensions))
 
@@ -288,6 +288,14 @@ def _embedding_has_vector_index(index_types: object) -> bool:
 
 def _embedding_index_options(options: object) -> dict[str, object]:
     if not isinstance(options, dict):
-        return {}
+        raise ValueError("Summary.embedding 向量索引 options 必须是对象")
     embedding_options = options.get(SUMMARY_EMBEDDING_PROPERTY)
-    return dict(embedding_options) if isinstance(embedding_options, dict) else {}
+    if not isinstance(embedding_options, dict):
+        raise ValueError("Summary.embedding 向量索引缺少 embedding options")
+    return dict(embedding_options)
+
+
+def _database_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} 必须是非空字符串")
+    return value

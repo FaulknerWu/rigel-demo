@@ -114,6 +114,8 @@ def enrich_java_semantic_edges(
 
 
 def _started_lsp(repository_root: Path, timeout_seconds: int) -> ContextManager[JavaLspClient]:
+    """启动 multilspy 管理的 Java LSP，并返回可直接进入的上下文管理器。"""
+
     config = MultilspyConfig.from_dict({"code_language": "java"})
     language_server = SyncLanguageServer.create(config, MultilspyLogger(), str(repository_root), timeout=timeout_seconds)
     return language_server.start_server()
@@ -186,7 +188,11 @@ def _walk_candidates(
             )
 
     # 继承/实现会在专门分支生成 SPECIALIZES 边，这里排除这些容器以免同一类型同时产生依赖边。
-    if owner_id is not None and node.type in TYPE_REFERENCE_NODE_KINDS and not has_ancestor_until_declaration(node, INHERITANCE_CONTAINER_KINDS, DECLARATION_NODE_KINDS):
+    if (
+        owner_id is not None
+        and node.type in TYPE_REFERENCE_NODE_KINDS
+        and not has_ancestor_until_declaration(node, INHERITANCE_CONTAINER_KINDS, DECLARATION_NODE_KINDS)
+    ):
         candidates.append(
             _candidate(
                 owner_id,
@@ -235,8 +241,6 @@ def _add_lsp_reference_edges(
         if target_file_paths is not None and target_entity.file_path not in target_file_paths:
             continue
         anchor = target_entity.name_anchor or target_entity.definition_anchor
-        if anchor is None:
-            continue
         # GraphIR 对外使用 1 基坐标；LSP 协议使用 0 基坐标，请求前必须还原。
         line = int(anchor.properties["start_line"]) - 1
         column = _lsp_utf16_column(
@@ -249,6 +253,7 @@ def _add_lsp_reference_edges(
             source_entity = graph_index.find_location_owner(location)
             if source_entity is None or source_entity.node.id == target_entity.node.id:
                 continue
+            # references 返回的是“谁引用了目标”，因此边方向保持 source -> target。
             _add_graph_edge_once(
                 graph,
                 GraphEdge.create(
@@ -268,9 +273,9 @@ def _add_override_edges(graph: GraphIR, graph_index: GraphIndex) -> None:
     parent_by_child = {
         edge.source_id: edge.target_id
         for edge in specializes_edges
-        if edge.properties.get("kind") in {SPECIALIZES_EXTENDS_KIND, SPECIALIZES_IMPLEMENTS_KIND}
+        if edge.properties["kind"] in {SPECIALIZES_EXTENDS_KIND, SPECIALIZES_IMPLEMENTS_KIND}
     }
-    method_entities = [entity for entity in graph_index.entities if entity.node.properties.get("kind_norm") == "method"]
+    method_entities = [entity for entity in graph_index.entities if entity.node.properties["kind_norm"] == "method"]
     methods_by_parent_and_name: dict[tuple[str, str], list[EntityView]] = {}
     for method_entity in method_entities:
         parent_name, method_name = _split_method_owner_and_name(str(method_entity.node.properties["qualified_name"]))
@@ -304,7 +309,7 @@ def _add_alias_edges(graph: GraphIR, graph_index: GraphIndex) -> None:
 
     entities_by_key: dict[str, list[EntityView]] = {}
     for entity in graph_index.entities:
-        entity_key = str(entity.node.properties.get("entity_key", ""))
+        entity_key = str(entity.node.properties["entity_key"])
         if entity_key:
             entities_by_key.setdefault(entity_key, []).append(entity)
 
@@ -317,8 +322,8 @@ def _add_alias_edges(graph: GraphIR, graph_index: GraphIndex) -> None:
                 continue
             kind = (
                 ALIAS_GENERATED_MIRROR_KIND
-                if aliased_entity.node.properties.get("origin") == "generated"
-                or canonical_entity.node.properties.get("origin") == "generated"
+                if aliased_entity.node.properties["origin"] == "generated"
+                or canonical_entity.node.properties["origin"] == "generated"
                 else ALIAS_DUPLICATE_ENTITY_KIND
             )
             _add_graph_edge_once(
@@ -336,7 +341,8 @@ def _add_alias_edges(graph: GraphIR, graph_index: GraphIndex) -> None:
 
 def _canonical_alias_entity(entities: list[EntityView]) -> EntityView:
     def sort_key(entity: EntityView) -> tuple[int, str]:
-        origin = str(entity.node.properties.get("origin", "internal"))
+        origin = str(entity.node.properties["origin"])
+        # 生成源码作为镜像实体时优先指向手写源码，降低后续展示和召回的噪音。
         origin_priority = 1 if origin == "generated" else 0
         return origin_priority, entity.file_path
 

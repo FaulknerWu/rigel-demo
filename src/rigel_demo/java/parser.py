@@ -56,7 +56,8 @@ def parse_java_file(
         zone=request.zone,
     )
     normalized_path = normalize_path(relative_path)
-    file_zone = request.file_zone or request.zone
+    file_zone = request.file_zone
+    # content_hash 绑定文件原文，用于仓库级增量索引判断文件是否需要重建子图。
     file_model = File(
         file_id=f"file:{request.repository_name}:{normalized_path}",
         relative_path=normalized_path,
@@ -120,6 +121,7 @@ def _extract_entity_records(
             continue
 
         # 方法体、类型体和 program 节点只是语义容器，自身不入图，但内部可能声明局部类型或成员。
+        # 其它表达式节点不继续深挖，避免把引用位置误当成声明实体。
         if child.type in BODY_NODE_KINDS or node.type == "program":
             records.extend(
                 _extract_entity_records(
@@ -185,8 +187,7 @@ def _create_method_record(
     parent_qualified_name: str,
     origin: str,
 ) -> _EntityRecord:
-    """创建方法实体记录。
-    """
+    """创建方法实体记录。"""
 
     name_node = _required_name_node(node)
     display_name = node_text(name_node, source_bytes)
@@ -229,8 +230,7 @@ def _create_field_records(
     parent_qualified_name: str,
     origin: str,
 ) -> list[_EntityRecord]:
-    """从字段声明中拆分出每一个变量实体。
-    """
+    """从字段声明中拆分出每一个变量实体。"""
 
     records: list[_EntityRecord] = []
     for declarator in node.named_children:
@@ -295,7 +295,7 @@ def _entity(
         entity_id=f"entity:{file_id}:{entity_key}",
         entity_key=entity_key,
         display_name=display_name,
-        qualified_name=qualified_name or _join_qualified_name(package_name, display_name),
+        qualified_name=qualified_name,
         kind_norm=kind_norm,
         kind_raw=kind_raw,
         origin=origin,
@@ -365,6 +365,7 @@ def _parameter_type(parameter_node: Node, source_bytes: bytes) -> str:
     """提取单个参数的类型文本。"""
 
     for child in parameter_node.named_children:
+        # Tree-sitter 的 formal_parameter 子节点通常是类型在前、identifier 在后。
         if child.type != "identifier":
             return node_text(child, source_bytes)
     return ""

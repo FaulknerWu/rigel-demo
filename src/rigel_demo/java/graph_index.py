@@ -10,6 +10,8 @@ from rigel_demo.java.source_utils import normalize_path
 
 @dataclass(frozen=True, slots=True)
 class EntityView:
+    """语义补全阶段使用的实体视图，预绑定文件路径和常用锚点。"""
+
     node: GraphNode
     file_path: str
     name_anchor: GraphNode | None
@@ -19,6 +21,8 @@ class EntityView:
 
 @dataclass(frozen=True, slots=True)
 class OwnerInterval:
+    """实体声明范围，用于把 LSP 返回的位置归属到最内层实体。"""
+
     entity_id: str
     start_line: int
     start_col: int
@@ -27,6 +31,8 @@ class OwnerInterval:
 
 
 class GraphIndex:
+    """为 GraphIR 建立只读索引，支撑 LSP 位置和图谱实体之间的相互映射。"""
+
     def __init__(self, graph: GraphIR) -> None:
         self.nodes_by_id = {node.id: node for node in graph.nodes}
         self.file_path_by_file_id = {
@@ -47,6 +53,8 @@ class GraphIndex:
         return entities[0] if len(entities) == 1 else None
 
     def find_location_target(self, location: JsonObject) -> EntityView | None:
+        """把 LSP 定义位置解析为目标实体。"""
+
         file_path, line, column = location_position(location)
         containing_entities: list[tuple[EntityView, tuple[int, int]]] = []
         for entity in self.entities_by_file_path.get(file_path, []):
@@ -61,11 +69,14 @@ class GraphIndex:
                 )
                 containing_entities.append((entity, span_size(interval)))
         if containing_entities:
+            # 定义跳转可能落在嵌套实体范围内，取最小声明区间可以定位到最具体目标。
             containing_entities.sort(key=lambda item: item[1])
             return containing_entities[0][0]
         return self.find_owner_entity(file_path, line + 1, column + 1)
 
     def find_location_owner(self, location: JsonObject) -> EntityView | None:
+        """把 LSP 引用位置解析为拥有该引用的源码实体。"""
+
         file_path, line, column = location_position(location)
         return self.find_owner_entity(file_path, line + 1, column + 1)
 
@@ -136,6 +147,7 @@ class GraphIndex:
                 )
             )
         for intervals in grouped.values():
+            # 小范围实体排在前面，确保同一位置优先归属到方法或局部类型而不是外层类型。
             intervals.sort(key=lambda interval: span_size(interval), reverse=False)
         return grouped
 
