@@ -42,6 +42,18 @@ class RigelGraphReader:
     def __init__(self, *, database_path: Path, graph_name: str) -> None:
         self._database_path = database_path
         self._graph_name = graph_name
+        self._store = FalkorDBStore.connect(
+            FalkorDBConfig(graph_name=self._graph_name, database_path=str(self._database_path))
+        )
+
+    def close(self) -> None:
+        self._store.close()
+
+    def __enter__(self) -> "RigelGraphReader":
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
 
     def summary(self) -> dict[str, object]:
         """统计默认可视化语义图谱的节点、边与节点类型分布。"""
@@ -101,6 +113,11 @@ class RigelGraphReader:
         node_ids = [node["id"] for node in nodes]
         if not node_ids:
             return {"nodes": [], "edges": []}
+        summaries_by_node_id = self._retrieval_summaries_by_node_id(node_ids)
+        nodes = [
+            _with_generated_summary(node, summaries_by_node_id)
+            for node in nodes
+        ]
 
         # 边只返回当前节点窗口内部的关系，避免前端收到指向缺失节点的悬空连线。
         edge_rows = self._query(
@@ -119,6 +136,28 @@ class RigelGraphReader:
         )
         edges = [format_edge(source_id, target_id, edge_type, properties) for source_id, target_id, edge_type, properties in edge_rows]
         return {"nodes": nodes, "edges": edges}
+
+    def _retrieval_summaries_by_node_id(self, node_ids: list[object]) -> dict[str, str]:
+        summary_rows = self._query(
+            """
+            MATCH (summary:RigelNode:Summary)-[:DESCRIBES]->(target:RigelNode)
+            WHERE target.id IN $node_ids
+              AND summary.purpose = $purpose
+            RETURN target.id, summary.text
+            ORDER BY target.id, summary.id
+            """,
+            {
+                "node_ids": node_ids,
+                "purpose": RETRIEVAL_SUMMARY_PURPOSE,
+            },
+        )
+
+        summaries_by_node_id: dict[str, str] = {}
+        for node_id, summary_text in summary_rows:
+            node_id_text = str(node_id)
+            if node_id_text not in summaries_by_node_id and isinstance(summary_text, str):
+                summaries_by_node_id[node_id_text] = summary_text
+        return summaries_by_node_id
 
     def recall(
         self,
@@ -446,10 +485,7 @@ class RigelGraphReader:
         return int(rows[0][0])
 
     def _query(self, query: str, parameters: Mapping[str, object]) -> list[list[Any]]:
-        store = FalkorDBStore.connect(
-            FalkorDBConfig(graph_name=self._graph_name, database_path=str(self._database_path))
-        )
-        result = store.graph.query(query, dict(parameters))
+        result = self._store.graph.query(query, dict(parameters))
         return list(result.result_set)
 
 
@@ -460,6 +496,18 @@ def _visible_edge_types(edge_types: list[str]) -> list[str]:
         for edge_type in dict.fromkeys(edge_types)
         if edge_type in visible_edge_type_set
     ]
+
+
+def _with_generated_summary(node: dict[str, object], summaries_by_node_id: Mapping[str, str]) -> dict[str, object]:
+    summary_text = summaries_by_node_id.get(str(node["id"]))
+    if summary_text is None:
+        return node
+
+    formatted_node = dict(node)
+    properties = dict(cast(Mapping[str, object], node["properties"]))
+    properties["generated_summary"] = summary_text
+    formatted_node["properties"] = properties
+    return formatted_node
 
 
 def _expand_graph_query(direction: GraphExpansionDirection) -> str:

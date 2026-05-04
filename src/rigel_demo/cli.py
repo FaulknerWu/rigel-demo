@@ -230,7 +230,8 @@ def _index_workspace_fully(
         stage="database_write",
         detail="写入完整图谱",
     )
-    _connect_workspace_store(workspace_paths).upsert_graph(index_result.graph)
+    with _connect_workspace_store(workspace_paths) as store:
+        store.upsert_graph(index_result.graph)
 
     return _index_result(
         workspace_paths,
@@ -254,23 +255,23 @@ def _index_workspace_incrementally(
         raise FileNotFoundError(f"未找到可增量索引的图数据库，请先执行 rigel index：{workspace_paths.database_path}")
 
     # 增量模式复用旧数据库中的文件哈希，先删旧子图再写新子图，保持演示实现简单可观察。
-    store = _connect_workspace_store(workspace_paths)
-    index_result = index_repository_incremental(
-        workspace_paths.repository_path,
-        previous_file_hashes=store.list_java_file_hashes(),
-        progress_reporter=progress_reporter,
-    )
-    _report_index_progress(
-        progress_reporter,
-        stage="database_write",
-        detail="删除旧子图并写入变更图谱",
-    )
-    deleted_node_count = store.delete_file_subgraphs(
-        [*index_result.modified_files, *index_result.deleted_files]
-    )
-    if index_result.graph.nodes or index_result.graph.edges:
-        store.upsert_graph(index_result.graph)
-    graph_node_count, graph_edge_count = store.graph_counts()
+    with _connect_workspace_store(workspace_paths) as store:
+        index_result = index_repository_incremental(
+            workspace_paths.repository_path,
+            previous_file_hashes=store.list_java_file_hashes(),
+            progress_reporter=progress_reporter,
+        )
+        _report_index_progress(
+            progress_reporter,
+            stage="database_write",
+            detail="删除旧子图并写入变更图谱",
+        )
+        deleted_node_count = store.delete_file_subgraphs(
+            [*index_result.modified_files, *index_result.deleted_files]
+        )
+        if index_result.graph.nodes or index_result.graph.edges:
+            store.upsert_graph(index_result.graph)
+        graph_node_count, graph_edge_count = store.graph_counts()
 
     return _index_result(
         workspace_paths,

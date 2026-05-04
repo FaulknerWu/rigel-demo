@@ -16,6 +16,7 @@ const apiNode: ApiNode = {
   type: 'Entity',
   label: 'RepositoryIndexer',
   properties: {
+    generated_summary: 'RepositoryIndexer 负责扫描仓库并构建图谱。',
     qualified_name: 'rigel_demo.project.RepositoryIndexer',
     relative_path: 'src/rigel_demo/project/repository_indexer.py',
     start_line: 12,
@@ -46,8 +47,19 @@ const graphNode = adaptNode(apiNode);
 assert.equal(graphNode.id, 'node-1');
 assert.equal(graphNode.name, 'RepositoryIndexer');
 assert.equal(graphNode.group, 'Entity');
-assert.match(graphNode.summary, /RepositoryIndexer/);
-assert.match(graphNode.summary, /第 12-48 行/);
+assert.equal(graphNode.summary, 'RepositoryIndexer 负责扫描仓库并构建图谱。');
+
+const fallbackGraphNode = adaptNode({
+  ...apiNode,
+  properties: {
+    qualified_name: 'rigel_demo.project.RepositoryIndexer',
+    relative_path: 'src/rigel_demo/project/repository_indexer.py',
+    start_line: 12,
+    end_line: 48,
+  },
+});
+assert.match(fallbackGraphNode.summary, /RepositoryIndexer/);
+assert.match(fallbackGraphNode.summary, /第 12-48 行/);
 
 const graphData = adaptGraph(apiGraph);
 assert.equal(graphData.nodes.length, 1);

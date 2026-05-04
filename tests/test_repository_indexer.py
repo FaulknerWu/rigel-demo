@@ -396,6 +396,37 @@ class RepositoryIndexerTest(TestCase):
 
         self.assertEqual([len(batch) for batch in embedding_client.text_batches], [1, 1])
 
+    def test_summary_prompt_requires_role_logic_and_recall_terms(self) -> None:
+        embedding_client = _FakeEmbeddingClient()
+        summary_client = _FakeSummaryClient()
+        graph = GraphIR()
+        graph.add_node(
+            Entity(
+                entity_id="entity:demo:fun.faulker.kami.controller.admin.AdminArticleController",
+                entity_key="java:fun.faulker.kami.controller.admin.AdminArticleController",
+                display_name="AdminArticleController",
+                qualified_name="fun.faulker.kami.controller.admin.AdminArticleController",
+                kind_norm="class",
+                kind_raw="class_declaration",
+                origin="internal",
+                semantic_hash="sha256:controller",
+            )
+        )
+
+        attach_retrieval_summaries(
+            graph,
+            embedding_client=embedding_client,
+            summary_client=summary_client,
+        )
+
+        prompt = summary_client.messages[0][-1].content
+        self.assertIn("职责", prompt)
+        self.assertIn("核心逻辑", prompt)
+        self.assertIn("检索", prompt)
+        self.assertIn("admin controller", prompt)
+        self.assertIn("管理端接口", prompt)
+        self.assertIn("AdminArticleController", prompt)
+
 
 class _FakeEmbeddingClient:
     def __init__(

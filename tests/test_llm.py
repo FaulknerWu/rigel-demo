@@ -89,6 +89,8 @@ class LLMConfigTest(TestCase):
         self.assertEqual(config.max_output_tokens, 256)
         self.assertEqual(config.concurrent_requests, 6)
         self.assertIn("摘要生成器", config.system_prompt)
+        self.assertIn("职责", config.system_prompt)
+        self.assertIn("检索别名", config.system_prompt)
 
     def test_summary_section_rejects_invalid_concurrent_requests(self) -> None:
         with TemporaryDirectory() as workspace:

@@ -14,6 +14,7 @@ export interface ApiEdge {
 }
 
 export interface ApiNodeProperties extends Record<string, unknown> {
+  generated_summary?: string;
   qualified_name?: string;
   relative_path?: string;
   start_line?: number;
@@ -229,6 +230,11 @@ function colorForNodeType(nodeType: string): string {
 }
 
 function formatNodeSummary(node: ApiNode): string {
+  const generatedSummary = node.properties.generated_summary?.trim();
+  if (generatedSummary) {
+    return generatedSummary;
+  }
+
   const qualifiedName = node.properties.qualified_name;
   const relativePath = node.properties.relative_path;
   const lineRange = formatLineRange(node.properties.start_line, node.properties.end_line);

@@ -140,13 +140,12 @@ class WebAppLLMTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             database_path = _write_demo_graph(repository_path, fake_embedding)
-            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
-
-            indexes = store.graph.query("CALL db.indexes()").result_set
-            vector_rows = store.graph.query(
-                "CALL db.idx.vector.queryNodes('Summary', 'embedding', 3, vecf32([1.0, 0.0, 0.0])) "
-                "YIELD node, score RETURN node.id, score"
-            ).result_set
+            with FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))) as store:
+                indexes = store.graph.query("CALL db.indexes()").result_set
+                vector_rows = store.graph.query(
+                    "CALL db.idx.vector.queryNodes('Summary', 'embedding', 3, vecf32([1.0, 0.0, 0.0])) "
+                    "YIELD node, score RETURN node.id, score"
+                ).result_set
 
         summary_index = next(index for index in indexes if index[0] == "Summary")
         self.assertEqual(summary_index[2]["embedding"], ["VECTOR"])
@@ -159,18 +158,31 @@ class WebAppLLMTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             database_path = _write_demo_graph(repository_path, fake_embedding)
-            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
-
-            rows = store.graph.query(
-                "MATCH (summary:RigelNode:Summary) RETURN summary.embedding LIMIT 1"
-            ).result_set
-            vector_rows = store.graph.query(
-                "CALL db.idx.vector.queryNodes('Summary', 'embedding', 1, vecf32([1.0, 0.0, 0.0])) "
-                "YIELD node, score RETURN node.id, score"
-            ).result_set
+            with FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))) as store:
+                rows = store.graph.query(
+                    "MATCH (summary:RigelNode:Summary) RETURN summary.embedding LIMIT 1"
+                ).result_set
+                vector_rows = store.graph.query(
+                    "CALL db.idx.vector.queryNodes('Summary', 'embedding', 1, vecf32([1.0, 0.0, 0.0])) "
+                    "YIELD node, score RETURN node.id, score"
+                ).result_set
 
         self.assertEqual(rows[0][0], [1.0, 0.0, 0.0])
         self.assertTrue(vector_rows[0][0].startswith("summary:"))
+
+    def test_graph_endpoint_returns_generated_summary_for_hover(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, chat_client=_FakeGraphRAGChat(), embedding_client=fake_embedding))
+
+            response = client.get("/api/graph")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        payment_node = next(node for node in payload["graph"]["nodes"] if node["id"] == "entity:demo:PaymentService")
+        self.assertEqual(payment_node["properties"]["generated_summary"], "PaymentService 处理付款流程")
 
     def test_source_reader_rejects_non_integer_line_ranges(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -195,16 +207,15 @@ class WebAppLLMTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             database_path = _write_demo_graph(repository_path, fake_embedding)
-            graph_reader = RigelGraphReader(database_path=database_path, graph_name="rigel")
-
-            neighbors = graph_reader.neighbors(["entity:demo:PaymentService"], limit=5)
-            paths = graph_reader.paths(
-                source_id="repo:demo",
-                target_id="entity:demo:PaymentService",
-                max_depth=3,
-                limit=5,
-            )
-            completions = graph_reader.auto_complete("Payment", limit=5)
+            with RigelGraphReader(database_path=database_path, graph_name="rigel") as graph_reader:
+                neighbors = graph_reader.neighbors(["entity:demo:PaymentService"], limit=5)
+                paths = graph_reader.paths(
+                    source_id="repo:demo",
+                    target_id="entity:demo:PaymentService",
+                    max_depth=3,
+                    limit=5,
+                )
+                completions = graph_reader.auto_complete("Payment", limit=5)
 
         self.assertEqual(neighbors["entity:demo:PaymentService"][0]["edge"]["type"], "CONTAINS")
         self.assertEqual(paths[0]["nodes"][0]["id"], "repo:demo")
@@ -216,20 +227,19 @@ class WebAppLLMTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             database_path = _write_demo_graph(repository_path, fake_embedding)
-            graph_reader = RigelGraphReader(database_path=database_path, graph_name="rigel")
-
-            outgoing = graph_reader.expand_graph(
-                node_id="file:demo:src/main/java/demo/PaymentService.java",
-                direction="outgoing",
-                edge_types=["CONTAINS"],
-                limit=5,
-            )
-            incoming = graph_reader.expand_graph(
-                node_id="file:demo:src/main/java/demo/PaymentService.java",
-                direction="incoming",
-                edge_types=["CONTAINS"],
-                limit=5,
-            )
+            with RigelGraphReader(database_path=database_path, graph_name="rigel") as graph_reader:
+                outgoing = graph_reader.expand_graph(
+                    node_id="file:demo:src/main/java/demo/PaymentService.java",
+                    direction="outgoing",
+                    edge_types=["CONTAINS"],
+                    limit=5,
+                )
+                incoming = graph_reader.expand_graph(
+                    node_id="file:demo:src/main/java/demo/PaymentService.java",
+                    direction="incoming",
+                    edge_types=["CONTAINS"],
+                    limit=5,
+                )
 
         self.assertEqual(outgoing["relations"][0]["direction"], "outgoing")
         self.assertEqual(outgoing["relations"][0]["node"]["id"], "entity:demo:PaymentService")
@@ -241,23 +251,22 @@ class WebAppLLMTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             database_path = _write_demo_graph(repository_path, fake_embedding)
-            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
-            store.upsert_edge(
-                GraphEdge.create(
-                    EdgeType.DESCRIBES,
-                    "repo:demo",
-                    "module:demo:root",
-                    kind="test-internal-edge",
+            with FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))) as store:
+                store.upsert_edge(
+                    GraphEdge.create(
+                        EdgeType.DESCRIBES,
+                        "repo:demo",
+                        "module:demo:root",
+                        kind="test-internal-edge",
+                    )
                 )
-            )
-            graph_reader = RigelGraphReader(database_path=database_path, graph_name="rigel")
-
-            expanded = graph_reader.expand_graph(
-                node_id="module:demo:root",
-                direction="incoming",
-                edge_types=["DESCRIBES"],
-                limit=5,
-            )
+            with RigelGraphReader(database_path=database_path, graph_name="rigel") as graph_reader:
+                expanded = graph_reader.expand_graph(
+                    node_id="module:demo:root",
+                    direction="incoming",
+                    edge_types=["DESCRIBES"],
+                    limit=5,
+                )
 
         self.assertEqual(expanded["relations"], [])
 
@@ -266,7 +275,6 @@ class WebAppLLMTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             database_path = _write_demo_graph(repository_path, fake_embedding)
-            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
             extra_anchor = Anchor(
                 anchor_id="anchor:entity:demo:PaymentService:extra",
                 start_line=1,
@@ -275,22 +283,22 @@ class WebAppLLMTest(TestCase):
                 end_col=10,
                 role="extra",
             )
-            store.upsert_graph(
-                GraphIR(
-                    nodes=[extra_anchor.to_node()],
-                    edges=[
-                        GraphEdge.create(
-                            EdgeType.HAS_ANCHOR,
-                            "entity:demo:PaymentService",
-                            extra_anchor.anchor_id,
-                            role="extra",
-                        )
-                    ],
+            with FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))) as store:
+                store.upsert_graph(
+                    GraphIR(
+                        nodes=[extra_anchor.to_node()],
+                        edges=[
+                            GraphEdge.create(
+                                EdgeType.HAS_ANCHOR,
+                                "entity:demo:PaymentService",
+                                extra_anchor.anchor_id,
+                                role="extra",
+                            )
+                        ],
+                    )
                 )
-            )
-            graph_reader = RigelGraphReader(database_path=database_path, graph_name="rigel")
-
-            anchor_payload = graph_reader.anchors_for_node("entity:demo:PaymentService")
+            with RigelGraphReader(database_path=database_path, graph_name="rigel") as graph_reader:
+                anchor_payload = graph_reader.anchors_for_node("entity:demo:PaymentService")
 
         self.assertIsNotNone(anchor_payload)
         anchors = anchor_payload["anchors"]
@@ -301,7 +309,6 @@ class WebAppLLMTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             database_path = _write_demo_graph(repository_path, fake_embedding)
-            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
             orphan_entity = Entity(
                 entity_id="entity:demo:DetachedService",
                 entity_key="java:demo.DetachedService",
@@ -327,35 +334,35 @@ class WebAppLLMTest(TestCase):
                 embedding_model=fake_embedding.config.model,
                 embedding=[1.0, 0.0, 0.0],
             )
-            store.upsert_graph(
-                GraphIR(
-                    nodes=[orphan_entity.to_node(), orphan_anchor.to_node(), orphan_summary.to_node()],
-                    edges=[
-                        GraphEdge.create(
-                            EdgeType.HAS_ANCHOR,
-                            orphan_entity.entity_id,
-                            orphan_anchor.anchor_id,
-                            role="definition",
-                        ),
-                        GraphEdge.create(
-                            EdgeType.DESCRIBES,
-                            orphan_summary.summary_id,
-                            orphan_entity.entity_id,
-                            kind="retrieval-summary",
-                        ),
-                    ],
+            with FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))) as store:
+                store.upsert_graph(
+                    GraphIR(
+                        nodes=[orphan_entity.to_node(), orphan_anchor.to_node(), orphan_summary.to_node()],
+                        edges=[
+                            GraphEdge.create(
+                                EdgeType.HAS_ANCHOR,
+                                orphan_entity.entity_id,
+                                orphan_anchor.anchor_id,
+                                role="definition",
+                            ),
+                            GraphEdge.create(
+                                EdgeType.DESCRIBES,
+                                orphan_summary.summary_id,
+                                orphan_entity.entity_id,
+                                kind="retrieval-summary",
+                            ),
+                        ],
+                    )
                 )
-            )
-            graph_reader = RigelGraphReader(database_path=database_path, graph_name="rigel")
-
-            context = graph_reader.context(
-                query="PaymentService",
-                query_embedding=[1.0, 0.0, 0.0],
-                embedding_model=fake_embedding.config.model,
-                limit=10,
-                expansion_limit=1,
-                source_reader=RepositorySourceReader(repository_path),
-            )
+            with RigelGraphReader(database_path=database_path, graph_name="rigel") as graph_reader:
+                context = graph_reader.context(
+                    query="PaymentService",
+                    query_embedding=[1.0, 0.0, 0.0],
+                    embedding_model=fake_embedding.config.model,
+                    limit=10,
+                    expansion_limit=1,
+                    source_reader=RepositorySourceReader(repository_path),
+                )
 
         orphan_seed = next(seed for seed in context["seeds"] if seed["node"]["id"] == orphan_entity.entity_id)
         self.assertIsNone(orphan_seed["source_file"])
@@ -493,12 +500,11 @@ class WebAppLLMTest(TestCase):
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
             database_path = _write_demo_graph(repository_path, fake_embedding)
-            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
-
-            deleted_count = store.delete_file_subgraphs(["src/main/java/demo/PaymentService.java"])
-            remaining_files = store.graph.query("MATCH (file:RigelNode:File) RETURN count(file)").result_set
-            remaining_summaries = store.graph.query("MATCH (summary:RigelNode:Summary) RETURN count(summary)").result_set
-            remaining_repositories = store.graph.query("MATCH (repo:RigelNode:Repository) RETURN count(repo)").result_set
+            with FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))) as store:
+                deleted_count = store.delete_file_subgraphs(["src/main/java/demo/PaymentService.java"])
+                remaining_files = store.graph.query("MATCH (file:RigelNode:File) RETURN count(file)").result_set
+                remaining_summaries = store.graph.query("MATCH (summary:RigelNode:Summary) RETURN count(summary)").result_set
+                remaining_repositories = store.graph.query("MATCH (repo:RigelNode:Repository) RETURN count(repo)").result_set
 
         self.assertGreater(deleted_count, 0)
         self.assertEqual(remaining_files[0][0], 0)
@@ -597,7 +603,8 @@ def _write_demo_graph(
     graph.add_edge(GraphEdge.create(EdgeType.HAS_ANCHOR, entity.entity_id, definition_anchor.anchor_id, role="definition"))
     graph.add_edge(GraphEdge.create(EdgeType.HAS_ANCHOR, entity.entity_id, body_anchor.anchor_id, role="body"))
     attach_retrieval_summaries(graph, embedding_client=embedding_client, summary_client=_FakeSummaryClient())
-    FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))).upsert_graph(graph)
+    with FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))) as store:
+        store.upsert_graph(graph)
     return database_path
 
 

@@ -10,6 +10,9 @@ const tooltipHtml = graphNodeTooltipHtml({
 assert.match(tooltipHtml, /&lt;PaymentService &amp; &quot;Checkout&quot;&gt;/);
 assert.match(tooltipHtml, /alert\(&#39;x&#39;\)/);
 assert.doesNotMatch(tooltipHtml, /<PaymentService/);
+assert.match(tooltipHtml, /width: max-content/);
+assert.match(tooltipHtml, /max-width: min\(720px, calc\(100vw - 32px\)\)/);
+assert.match(tooltipHtml, /overflow-wrap: anywhere/);
 
 const indexResult: IndexResult = {
   mode: 'incremental',

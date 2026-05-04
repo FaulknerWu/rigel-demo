@@ -103,9 +103,10 @@ class CliIndexTest(TestCase):
             database_path = repository_path / ".rigel" / "falkordb.db"
             config_path.parent.mkdir(parents=True)
             config_path.write_text(json.dumps(DEFAULT_CONFIG_DOCUMENT, ensure_ascii=False) + "\n", encoding="utf-8")
-            FalkorDBStore.connect(
+            with FalkorDBStore.connect(
                 FalkorDBConfig(graph_name=DEFAULT_GRAPH_NAME, database_path=str(database_path))
-            ).upsert_graph(_demo_graph())
+            ) as store:
+                store.upsert_graph(_demo_graph())
 
             with patch("rigel_demo.project.repository_indexer.index_repository_incremental") as index_repository_incremental:
                 index_repository_incremental.return_value = SimpleNamespace(

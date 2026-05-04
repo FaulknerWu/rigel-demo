@@ -13,9 +13,9 @@ export function graphNodeTooltipHtml(node: Pick<GraphNode, 'name' | 'summary'>):
   const safeSummary = escapeHtml(node.summary);
 
   return `
-    <div style="background-color: rgba(15, 23, 42, 0.95); color: #e2e8f0; padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1); max-width: 250px; font-family: ui-sans-serif, system-ui, sans-serif; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); backdrop-filter: blur(8px);">
-      <div style="font-weight: 600; color: #ffffff; margin-bottom: 6px; font-size: 13px;">${safeName}</div>
-      <div style="font-size: 11px; color: #94a3b8; white-space: pre-wrap; line-height: 1.5;">${safeSummary}</div>
+    <div style="display: inline-block; width: max-content; min-width: 220px; max-width: min(720px, calc(100vw - 32px)); box-sizing: border-box; background-color: rgba(15, 23, 42, 0.95); color: #e2e8f0; padding: 12px 14px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1); font-family: ui-sans-serif, system-ui, sans-serif; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); backdrop-filter: blur(8px); overflow-wrap: anywhere; word-break: break-word;">
+      <div style="font-weight: 600; color: #ffffff; margin-bottom: 8px; font-size: 13px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere;">${safeName}</div>
+      <div style="font-size: 11px; color: #94a3b8; white-space: pre-wrap; line-height: 1.55; overflow-wrap: anywhere;">${safeSummary}</div>
     </div>
   `;
 }

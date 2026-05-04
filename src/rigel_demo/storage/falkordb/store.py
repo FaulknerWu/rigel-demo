@@ -49,8 +49,9 @@ class FalkorDBConfig:
 class FalkorDBStore:
     """把 GraphIR 幂等写入 FalkorDB。"""
 
-    def __init__(self, graph: Any) -> None:
+    def __init__(self, graph: Any, client: Any | None = None) -> None:
         self._graph = graph
+        self._client = client
 
     @property
     def graph(self) -> Any:
@@ -67,7 +68,20 @@ class FalkorDBStore:
         database_path = Path(config.database_path)
         database_path.parent.mkdir(parents=True, exist_ok=True)
         client = FalkorDB(str(database_path))
-        return cls(client.select_graph(config.graph_name))
+        return cls(client.select_graph(config.graph_name), client)
+
+    def close(self) -> None:
+        """释放 FalkorDBLite 后台 Redis 进程。"""
+
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    def __enter__(self) -> "FalkorDBStore":
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
 
     def upsert_graph(self, graph_ir: GraphIR) -> None:
         """按节点再边的顺序幂等写入完整 GraphIR。"""

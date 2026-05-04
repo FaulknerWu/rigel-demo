@@ -55,18 +55,24 @@ def create_app(
     static_assets_path = static_frontend_path / "assets"
     static_index_path = static_frontend_path / "index.html"
     graph_name = _read_graph_name(state_path)
-    graph_reader = RigelGraphReader(database_path=database_path, graph_name=graph_name)
     active_embedding_client = _resolve_embedding_client(resolved_repository_path, embedding_client)
     active_chat_client = _resolve_chat_client(
         resolved_repository_path,
         chat_client,
         graph_name=graph_name,
+        database_path=database_path,
     )
     incremental_index_lock = Lock()
 
     app = FastAPI(title="Rigel Demo", version="0.1.0")
 
     app.mount("/assets", StaticFiles(directory=static_assets_path), name="assets")
+
+    @app.on_event("shutdown")
+    def shutdown() -> None:
+        close_chat_client = getattr(active_chat_client, "close", None)
+        if callable(close_chat_client):
+            close_chat_client()
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
@@ -87,7 +93,8 @@ def create_app(
         """返回图谱概览统计。"""
 
         _ensure_database_exists(database_path)
-        return {"status": "success", "summary": graph_reader.summary()}
+        with RigelGraphReader(database_path=database_path, graph_name=graph_name) as graph_reader:
+            return {"status": "success", "summary": graph_reader.summary()}
 
     @app.get("/api/graph")
     def graph(limit: int = DEFAULT_GRAPH_LIMIT) -> dict[str, object]:
@@ -96,7 +103,8 @@ def create_app(
         _ensure_database_exists(database_path)
         if limit < 1:
             raise HTTPException(status_code=400, detail="limit 必须大于 0")
-        return {"status": "success", "graph": graph_reader.graph(limit=limit)}
+        with RigelGraphReader(database_path=database_path, graph_name=graph_name) as graph_reader:
+            return {"status": "success", "graph": graph_reader.graph(limit=limit)}
 
     @app.post("/api/index/incremental")
     def incremental_index() -> dict[str, object]:
@@ -217,6 +225,7 @@ def _resolve_chat_client(
     provided_client: RigelChatService | None,
     *,
     graph_name: str,
+    database_path: Path,
 ) -> RigelChatService:
     if provided_client is not None:
         return provided_client
@@ -224,6 +233,7 @@ def _resolve_chat_client(
     return build_graphrag_chat_service(
         repository_path=repository_path,
         graph_name=graph_name,
+        database_path=database_path,
     )
 
 

@@ -361,8 +361,16 @@ def _summary_progress_detail(target_node: GraphNode) -> str:
 def _summary_prompt(target_node: GraphNode) -> str:
     properties_json = json.dumps(target_node.properties, ensure_ascii=False, sort_keys=True, indent=2)
     return (
-        "请为以下代码图谱节点生成一条检索摘要。\n"
-        "要求：摘要需要覆盖节点类型、名称、路径或限定名等关键信息；不要输出列表、Markdown 或解释。\n\n"
+        "请为以下代码图谱节点生成一条用于向量召回的检索摘要。\n"
+        "写作要求：\n"
+        "1. 用一段中文自然语言完整记录节点类型、名称、路径或限定名、代码区域、语言和来源。\n"
+        "2. 说明该节点承担的职责、核心逻辑、对外提供的能力、构建或维护的数据/接口/流程。\n"
+        "3. 如果是 Java 类、接口、方法、字段或文件，结合 kind、qualified_name、display_name、"
+        "entity_key、relative_path 等属性写出用户可能搜索的业务词、技术词、简称和别名。\n"
+        "4. 对 controller、service、repository、configuration、model、dto、request、response、"
+        "test、generated 等常见角色要显式记录其角色含义；例如 admin controller 需要写明它负责"
+        "管理端接口、文章或内容管理等可由名称推断出的召回关键词。\n"
+        "5. 不要只复述文件路径；不要输出列表、Markdown 或解释；无法从属性确认的事实不要编造。\n\n"
         f"节点类型：{target_node.type.value}\n"
         f"节点 ID：{target_node.id}\n"
         f"结构摘要：{_local_summary_text(target_node)}\n"
