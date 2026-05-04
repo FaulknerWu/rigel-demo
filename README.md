@@ -153,7 +153,7 @@ RETURN entity.qualified_name, target.qualified_name
 边连接到被描述的图谱节点。`Summary.summary_model` 和 `Summary.embedding_model`
 会分别记录两类模型名称。
 
-Web 后端通过 `/api/tools/recall` 暴露结构化召回上下文，流程为：
+LangGraph Agent 内部通过 `recall` 工具获取结构化召回上下文，流程为：
 
 1. 将用户问题映射到同一套本地向量空间。
 2. 通过 FalkorDB 原生向量索引查询 `Summary.embedding`，得到召回种子。
@@ -167,19 +167,6 @@ Web 后端通过 `/api/tools/recall` 暴露结构化召回上下文，流程为�
 
 Web 图谱面板右下角的增量刷新按钮会调用 `/api/index/incremental`，等价于在当前仓库执行
 `rigel index --incremental`，成功后重新加载图谱并展示新增、修改、删除、跳过文件等统计。
-
-## Agent REST 工具接口
-
-Web 后端额外暴露一组只读工具接口，供外部 Agent 复用同一份 `.rigel`
-索引产物。接口只返回结构化图谱证据与源码片段；Web Chat 内部也复用同一组工具能力。
-
-- `POST /api/tools/recall`：输入 `query`、`limit`、`expansion_limit`，返回向量召回种子、摘要、相关一跳关系、源码文件、锚点和少量源码切片。
-- `POST /api/tools/anchors`：输入 `node_id`，返回节点详情、所属源码文件与全部锚点坐标。
-- `POST /api/tools/source`：输入 `path`、`start_line`、`end_line`、可选 `max_lines`，读取已索引源码文件的安全行号切片。
-- `POST /api/tools/expand`：输入 `node_id`、`direction`、`edge_types`、`limit`，返回指定节点的一跳局部图关系。
-
-这些接口复用 CLI 写入的 `.rigel/rigel.json` 和 `.rigel/falkordb.db`，因此使用前仍需先执行
-`rigel init`、填写配置并完成 `rigel index`。
 
 Rigel 主仓库正式的架构决策与主线规划见：
 - GitHub: <https://github.com/FaulknerWu/Rigel>

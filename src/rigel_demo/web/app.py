@@ -23,17 +23,8 @@ from rigel_demo.cli import (
 )
 from rigel_demo.agent.service import (
     DEFAULT_GRAPH_LIMIT,
-    DEFAULT_RECALL_EXPANSION_LIMIT,
-    DEFAULT_RECALL_LIMIT,
-    DEFAULT_SOURCE_SLICE_MAX_LINES,
-    VISIBLE_EDGE_TYPES,
-    GraphExpansionDirection,
     RepositorySourceReader,
     RigelGraphReader,
-    SourceFileNotFoundError,
-    SourceLineRangeError,
-    SourcePathError,
-    SourceReadError,
 )
 from rigel_demo.agent.langgraph_agent import (
     CodeGraphAgentError,
@@ -52,13 +43,6 @@ from rigel_demo.llm import (
     LLMMessage,
     LLMResponseError,
 )
-
-MAX_AGENT_RECALL_LIMIT = 20
-MAX_AGENT_EXPANSION_LIMIT = 10
-MAX_AGENT_SOURCE_SLICE_LINES = 300
-DEFAULT_AGENT_EXPAND_LIMIT = 20
-MAX_AGENT_EXPAND_LIMIT = 100
-
 
 def create_app(
     repository_path: Path | None = None,
@@ -121,100 +105,6 @@ def create_app(
         if limit < 1:
             raise HTTPException(status_code=400, detail="limit 必须大于 0")
         return {"status": "success", "graph": graph_reader.graph(limit=limit)}
-
-    @app.post("/api/tools/recall")
-    def tool_recall(request: AgentSemanticRecallRequest) -> dict[str, object]:
-        """工具：基于自然语言问题召回图谱证据上下文。"""
-
-        _ensure_database_exists(database_path)
-        query = request.query.strip()
-        if not query:
-            raise HTTPException(status_code=400, detail="query 不能为空")
-        _ensure_agent_range(request.limit, "limit", minimum=1, maximum=MAX_AGENT_RECALL_LIMIT)
-        _ensure_agent_range(request.expansion_limit, "expansion_limit", minimum=0, maximum=MAX_AGENT_EXPANSION_LIMIT)
-        try:
-            query_embedding = active_embedding_client.embed_query(query)
-        except (EmbeddingRequestError, EmbeddingResponseError) as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
-
-        return {
-            "status": "success",
-            "context": graph_reader.context(
-                query=query,
-                query_embedding=query_embedding,
-                embedding_model=active_embedding_client.config.model,
-                limit=request.limit,
-                expansion_limit=request.expansion_limit,
-                source_reader=source_reader,
-            ),
-        }
-
-    @app.post("/api/tools/anchors")
-    def tool_anchors(request: AgentNodeAnchorsRequest) -> dict[str, object]:
-        """工具：读取指定图谱节点的源码锚点。"""
-
-        _ensure_database_exists(database_path)
-        result = graph_reader.anchors_for_node(request.node_id)
-        if result is None:
-            raise HTTPException(status_code=404, detail=f"未找到节点：{request.node_id}")
-        return {"status": "success", **result}
-
-    @app.post("/api/tools/source")
-    def tool_source(request: AgentSourceSliceRequest) -> dict[str, object]:
-        """工具：读取已索引源码文件的安全行号切片。"""
-
-        _ensure_database_exists(database_path)
-        _ensure_agent_range(request.max_lines, "max_lines", minimum=1, maximum=MAX_AGENT_SOURCE_SLICE_LINES)
-        try:
-            normalized_path = source_reader.normalize_relative_path(request.path)
-        except SourcePathError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-
-        source_file = graph_reader.source_file(normalized_path)
-        if source_file is None:
-            raise HTTPException(status_code=404, detail=f"未找到已索引源码文件：{normalized_path}")
-
-        try:
-            source_slice = source_reader.read_slice(
-                normalized_path,
-                start_line=request.start_line,
-                end_line=request.end_line,
-                max_lines=request.max_lines,
-            )
-        except SourceLineRangeError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-        except SourceFileNotFoundError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
-        except SourceReadError as error:
-            raise HTTPException(status_code=500, detail=str(error)) from error
-
-        return {
-            "status": "success",
-            "source": {
-                **source_slice,
-                "source_file": source_file,
-            },
-        }
-
-    @app.post("/api/tools/expand")
-    def tool_expand(request: AgentExpandGraphRequest) -> dict[str, object]:
-        """工具：读取指定节点的一跳局部图关系。"""
-
-        _ensure_database_exists(database_path)
-        _ensure_agent_range(request.limit, "limit", minimum=1, maximum=MAX_AGENT_EXPAND_LIMIT)
-        _ensure_agent_edge_types(request.edge_types)
-        if graph_reader.node_by_id(request.node_id) is None:
-            raise HTTPException(status_code=404, detail=f"未找到节点：{request.node_id}")
-
-        return {
-            "status": "success",
-            "graph": graph_reader.expand_graph(
-                node_id=request.node_id,
-                direction=request.direction,
-                edge_types=request.edge_types,
-                limit=request.limit,
-            ),
-        }
 
     @app.post("/api/index/incremental")
     def incremental_index() -> dict[str, object]:
@@ -290,38 +180,6 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessagePayload] = Field(min_length=1, max_length=50)
 
 
-class AgentSemanticRecallRequest(BaseModel):
-    """Agent 语义召回工具请求体。"""
-
-    query: str = Field(min_length=1)
-    limit: int = DEFAULT_RECALL_LIMIT
-    expansion_limit: int = DEFAULT_RECALL_EXPANSION_LIMIT
-
-
-class AgentNodeAnchorsRequest(BaseModel):
-    """Agent 节点锚点工具请求体。"""
-
-    node_id: str = Field(min_length=1)
-
-
-class AgentSourceSliceRequest(BaseModel):
-    """Agent 源码切片工具请求体。"""
-
-    path: str = Field(min_length=1)
-    start_line: int
-    end_line: int
-    max_lines: int = DEFAULT_SOURCE_SLICE_MAX_LINES
-
-
-class AgentExpandGraphRequest(BaseModel):
-    """Agent 局部图扩展工具请求体。"""
-
-    node_id: str = Field(min_length=1)
-    direction: GraphExpansionDirection = "both"
-    edge_types: list[str] = Field(default_factory=lambda: list(VISIBLE_EDGE_TYPES))
-    limit: int = DEFAULT_AGENT_EXPAND_LIMIT
-
-
 def _read_graph_name(state_path: Path) -> str:
     """读取索引状态中的图名称。"""
 
@@ -336,21 +194,6 @@ def _ensure_database_exists(database_path: Path) -> None:
             status_code=404,
             detail=f"未找到数据库文件，请先在目标仓库执行 rigel index: {database_path}",
         )
-
-
-def _ensure_agent_range(value: int, name: str, *, minimum: int, maximum: int) -> None:
-    """校验 Agent 工具数值参数，保持工具错误统一返回 400。"""
-
-    if isinstance(value, bool) or value < minimum or value > maximum:
-        raise HTTPException(status_code=400, detail=f"{name} 必须在 {minimum} 到 {maximum} 之间")
-
-
-def _ensure_agent_edge_types(edge_types: list[str]) -> None:
-    """校验 Agent 局部图扩展的边类型。"""
-
-    invalid_edge_types = [edge_type for edge_type in edge_types if edge_type not in VISIBLE_EDGE_TYPES]
-    if invalid_edge_types:
-        raise HTTPException(status_code=400, detail=f"不支持的 edge_types：{', '.join(invalid_edge_types)}")
 
 
 def _resolve_chat_client(
