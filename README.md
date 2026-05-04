@@ -130,7 +130,7 @@ source_path = Path("src/main/java/demo/Service.java")
 graph = parse_java_file(
     source_path.read_text(encoding="utf-8"),
     str(source_path),
-    request=JavaParseRequest(repository_name="rigel", module_name="core"),
+    request=JavaParseRequest(repository_name="rigel", module_name="core", file_zone="prod"),
 )
 
 store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=".rigel/falkordb.db"))
@@ -152,14 +152,15 @@ RETURN entity.qualified_name, target.qualified_name
 边连接到被描述的图谱节点。`Summary.summary_model` 和 `Summary.embedding_model`
 会分别记录两类模型名称。
 
-Web 后端提供 `/api/recall?q=PaymentService`，流程为：
+Web 后端通过 `/api/agent/tools/semantic_recall` 暴露结构化召回上下文，流程为：
 
 1. 将用户问题映射到同一套本地向量空间。
 2. 通过 FalkorDB 原生向量索引查询 `Summary.embedding`，得到召回种子。
 3. 通过 `DESCRIBES` 锁定目标 Module、File 或 Entity。
 4. 沿 `CONTAINS`、`DEPENDS_ON`、`SPECIALIZES`、`ALIASES` 补充一跳上下文。
+5. 结合源码锚点读取少量安全源码切片，作为 Agent 可引用的证据。
 
-`/api/chat` 使用这条向量召回链路组装代码图谱上下文；召回为空时不再追加关键词搜索上下文。
+`/api/chat` 使用这条向量召回链路组装代码图谱上下文；召回为空时直接保留原始对话消息。
 
 Web 图谱面板右下角的增量刷新按钮会调用 `/api/index/incremental`，等价于在当前仓库执行
 `rigel index --incremental`，成功后重新加载图谱并展示新增、修改、删除、跳过文件等统计。
