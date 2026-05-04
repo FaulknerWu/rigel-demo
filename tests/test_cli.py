@@ -217,7 +217,7 @@ class CliFrontendBuildTest(TestCase):
         with TemporaryDirectory() as workspace:
             static_path = Path(workspace) / ".rigel" / "web" / "static"
 
-            with patch("rigel_demo.cli.shutil.which", return_value=None):
+            with patch("rigel_demo.cli_frontend.shutil.which", return_value=None):
                 result = build_frontend(static_path)
 
         self.assertFalse(result.success)

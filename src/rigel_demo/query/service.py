@@ -7,110 +7,33 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from rigel_demo.project.summaries import RETRIEVAL_SUMMARY_PURPOSE
+from rigel_demo.query.context import source_slices_for_anchors
+from rigel_demo.query.presentation import (
+    anchor_sort_key,
+    cosine_distance_to_similarity,
+    format_anchor,
+    format_edge,
+    format_graph_relation,
+    format_node,
+    format_source_file,
+    format_summary,
+)
+from rigel_demo.query.source_reader import (
+    RepositorySourceReader,
+    SourceFileNotFoundError,
+    SourceLineRangeError,
+    SourcePathError,
+    SourceReadError,
+)
 from rigel_demo.storage.falkordb.store import FalkorDBConfig, FalkorDBStore
 
 DEFAULT_GRAPH_LIMIT = 500
 DEFAULT_RECALL_LIMIT = 8
 DEFAULT_RECALL_EXPANSION_LIMIT = 3
-DEFAULT_SOURCE_SLICE_MAX_LINES = 120
-DEFAULT_CONTEXT_SOURCE_SLICE_LIMIT = 1
 VISIBLE_NODE_TYPES = ("Repository", "Module", "File", "Entity")
 VISIBLE_EDGE_TYPES = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES")
 
 GraphExpansionDirection = Literal["incoming", "outgoing", "both"]
-
-
-class SourcePathError(ValueError):
-    """源码路径不在当前仓库内。"""
-
-
-class SourceLineRangeError(ValueError):
-    """源码切片行号范围不可用。"""
-
-
-class SourceFileNotFoundError(FileNotFoundError):
-    """源码文件不存在。"""
-
-
-class SourceReadError(RuntimeError):
-    """源码文件读取失败。"""
-
-
-class RepositorySourceReader:
-    """从当前仓库安全读取源码切片。"""
-
-    def __init__(self, repository_path: Path) -> None:
-        self._repository_path = repository_path.resolve()
-
-    def normalize_relative_path(self, relative_path: str) -> str:
-        candidate_path = self._resolve_repository_file(relative_path)
-        try:
-            return candidate_path.relative_to(self._repository_path).as_posix()
-        except ValueError as error:
-            raise SourcePathError("源码路径必须位于当前仓库内") from error
-
-    def read_slice(
-        self,
-        relative_path: str,
-        *,
-        start_line: int,
-        end_line: int,
-        max_lines: int = DEFAULT_SOURCE_SLICE_MAX_LINES,
-    ) -> dict[str, object]:
-        normalized_path = self.normalize_relative_path(relative_path)
-        _ensure_positive_int(max_lines, "max_lines")
-        _ensure_positive_int(start_line, "start_line")
-        _ensure_positive_int(end_line, "end_line")
-        if end_line < start_line:
-            raise SourceLineRangeError("end_line 必须大于或等于 start_line")
-
-        bounded_end_line = min(end_line, start_line + max_lines - 1)
-        file_path = self._repository_path / normalized_path
-        if not file_path.exists() or not file_path.is_file():
-            raise SourceFileNotFoundError(f"未找到源码文件：{normalized_path}")
-
-        try:
-            lines = file_path.read_text(encoding="utf-8").splitlines()
-        except UnicodeDecodeError as error:
-            raise SourceReadError(f"源码文件不是 UTF-8 文本：{normalized_path}") from error
-        except OSError as error:
-            raise SourceReadError(f"读取源码文件失败：{normalized_path}") from error
-
-        total_lines = len(lines)
-        if start_line > total_lines:
-            raise SourceLineRangeError(f"start_line 超出文件总行数：{total_lines}")
-
-        actual_end_line = min(bounded_end_line, total_lines)
-        selected_lines = lines[start_line - 1 : actual_end_line]
-        return {
-            "relative_path": normalized_path,
-            "start_line": start_line,
-            "end_line": actual_end_line,
-            "requested_end_line": end_line,
-            "truncated": actual_end_line < end_line,
-            "total_lines": total_lines,
-            "content": "\n".join(selected_lines),
-        }
-
-    def _resolve_repository_file(self, relative_path: str) -> Path:
-        if not relative_path.strip():
-            raise SourcePathError("源码路径不能为空")
-        raw_path = Path(relative_path)
-        if raw_path.is_absolute():
-            candidate_path = raw_path.resolve()
-        else:
-            candidate_path = (self._repository_path / raw_path).resolve()
-        try:
-            # resolve 后再 relative_to，可以同时拦截绝对路径和 `..` 逃逸。
-            candidate_path.relative_to(self._repository_path)
-        except ValueError as error:
-            raise SourcePathError("源码路径必须位于当前仓库内") from error
-        return candidate_path
-
-
-def _ensure_positive_int(value: object, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise SourceLineRangeError(f"{name} 必须大于 0")
 
 
 class RigelGraphReader:
@@ -174,7 +97,7 @@ class RigelGraphReader:
             """,
             {"visible_node_types": list(VISIBLE_NODE_TYPES), "limit": limit},
         )
-        nodes = [_format_node(node_id, properties) for node_id, properties in node_rows]
+        nodes = [format_node(node_id, properties) for node_id, properties in node_rows]
         node_ids = [node["id"] for node in nodes]
         if not node_ids:
             return {"nodes": [], "edges": []}
@@ -194,7 +117,7 @@ class RigelGraphReader:
                 "limit": limit * 2,
             },
         )
-        edges = [_format_edge(source_id, target_id, edge_type, properties) for source_id, target_id, edge_type, properties in edge_rows]
+        edges = [format_edge(source_id, target_id, edge_type, properties) for source_id, target_id, edge_type, properties in edge_rows]
         return {"nodes": nodes, "edges": edges}
 
     def recall(
@@ -230,14 +153,14 @@ class RigelGraphReader:
         )
         scored_results: list[dict[str, object]] = []
         for summary_id, summary_properties, target_id, target_properties, distance in rows:
-            score = _cosine_distance_to_similarity(distance)
+            score = cosine_distance_to_similarity(distance)
             if score <= 0:
                 continue
-            node = _format_node(target_id, target_properties)
+            node = format_node(target_id, target_properties)
             scored_results.append(
                 {
                     "score": score,
-                    "summary": _format_summary(summary_id, summary_properties),
+                    "summary": format_summary(summary_id, summary_properties),
                     "node": node,
                     "related": self.related_nodes(target_id, limit=expansion_limit),
                 }
@@ -304,7 +227,7 @@ class RigelGraphReader:
         )
         if not rows:
             return None
-        return _format_source_file(_format_node(rows[0][0], rows[0][1]))
+        return format_source_file(format_node(rows[0][0], rows[0][1]))
 
     def node_by_id(self, node_id: str) -> dict[str, object] | None:
         rows = self._query(
@@ -318,7 +241,7 @@ class RigelGraphReader:
         )
         if not rows:
             return None
-        return _format_node(rows[0][0], rows[0][1])
+        return format_node(rows[0][0], rows[0][1])
 
     def related_nodes(self, node_id: str, *, limit: int) -> list[dict[str, object]]:
         return self.expand_graph(
@@ -385,9 +308,9 @@ class RigelGraphReader:
         )
         return [
             {
-                "nodes": [_format_node(node_id, properties) for node_id, properties in node_rows],
+                "nodes": [format_node(node_id, properties) for node_id, properties in node_rows],
                 "edges": [
-                    _format_edge(edge_source_id, edge_target_id, edge_type, properties)
+                    format_edge(edge_source_id, edge_target_id, edge_type, properties)
                     for edge_source_id, edge_target_id, edge_type, properties in edge_rows
                 ],
             }
@@ -420,7 +343,7 @@ class RigelGraphReader:
                 "limit": limit,
             },
         )
-        return [_format_node(node_id, properties) for node_id, properties in rows]
+        return [format_node(node_id, properties) for node_id, properties in rows]
 
     def expand_graph(
         self,
@@ -442,7 +365,7 @@ class RigelGraphReader:
                 "limit": limit,
             },
         )
-        relations = [_format_graph_relation(row, origin_node_id=node_id) for row in rows]
+        relations = [format_graph_relation(row, origin_node_id=node_id) for row in rows]
         return {"node_id": node_id, "relations": relations}
 
     def _context_seed_from_recall_result(
@@ -464,7 +387,7 @@ class RigelGraphReader:
             "related": result["related"],
             "source_file": source_file,
             "anchors": anchors,
-            "source_slices": _source_slices_for_anchors(anchors, source_reader=source_reader),
+            "source_slices": source_slices_for_anchors(anchors, source_reader=source_reader),
         }
 
     def _anchors_for_node(
@@ -482,10 +405,10 @@ class RigelGraphReader:
             {"node_id": node_id},
         )
         anchors = [
-            _format_anchor(anchor_id, anchor_properties, edge_properties, source_file)
+            format_anchor(anchor_id, anchor_properties, edge_properties, source_file)
             for anchor_id, anchor_properties, edge_properties in rows
         ]
-        anchors.sort(key=_anchor_sort_key)
+        anchors.sort(key=anchor_sort_key)
         return anchors
 
     def _source_file_for_node(self, node_id: str) -> dict[str, object] | None:
@@ -497,7 +420,7 @@ class RigelGraphReader:
             if node is None:
                 return None
             if node["type"] == "File":
-                return _format_source_file(node)
+                return format_source_file(node)
             # 实体没有直接保存文件路径，沿 CONTAINS 父链回溯到最近的 File 节点。
             current_node_id = self._parent_node_id(current_node_id)
         return None
@@ -530,45 +453,6 @@ class RigelGraphReader:
         return list(result.result_set)
 
 
-def _source_slices_for_anchors(
-    anchors: list[dict[str, object]],
-    *,
-    source_reader: RepositorySourceReader,
-) -> list[dict[str, object]]:
-    source_slices: list[dict[str, object]] = []
-    for anchor in anchors[:DEFAULT_CONTEXT_SOURCE_SLICE_LIMIT]:
-        source_file_value = anchor.get("source_file")
-        if not isinstance(source_file_value, Mapping):
-            continue
-        source_file = dict(source_file_value)
-        relative_path = source_file.get("relative_path")
-        if not isinstance(relative_path, str) or not relative_path.strip():
-            continue
-        try:
-            source_slice = source_reader.read_slice(
-                relative_path,
-                start_line=int(anchor["start_line"]),
-                end_line=int(anchor["end_line"]),
-            )
-        except (SourcePathError, SourceLineRangeError, SourceFileNotFoundError, SourceReadError):
-            continue
-        source_slices.append(
-            {
-                **source_slice,
-                "anchor": {
-                    "id": anchor["id"],
-                    "role": anchor["role"],
-                    "start_line": anchor["start_line"],
-                    "start_col": anchor["start_col"],
-                    "end_line": anchor["end_line"],
-                    "end_col": anchor["end_col"],
-                },
-                "source_file": source_file,
-            }
-        )
-    return source_slices
-
-
 def _visible_edge_types(edge_types: list[str]) -> list[str]:
     visible_edge_type_set = set(VISIBLE_EDGE_TYPES)
     return [
@@ -596,124 +480,3 @@ def _expand_graph_query(direction: GraphExpansionDirection) -> str:
     RETURN source.id, properties(source), target.id, properties(target), type(edge), properties(edge)
     LIMIT $limit
     """
-
-
-def _format_graph_relation(row: list[Any], *, origin_node_id: str) -> dict[str, object]:
-    source_id, source_properties, target_id, target_properties, edge_type, edge_properties = row
-    source_node = _format_node(source_id, source_properties)
-    target_node = _format_node(target_id, target_properties)
-    is_outgoing = source_id == origin_node_id
-    return {
-        "direction": "outgoing" if is_outgoing else "incoming",
-        "edge": _format_edge(source_id, target_id, edge_type, edge_properties),
-        "node": target_node if is_outgoing else source_node,
-    }
-
-
-def _read_property(properties: Mapping[str, object], name: str) -> str:
-    return cast(str, properties[name])
-
-
-def _format_node(node_id: str, properties: Mapping[str, object]) -> dict[str, object]:
-    formatted_properties = dict(properties)
-    return {
-        "id": node_id,
-        "type": str(formatted_properties["rigel_type"]),
-        "label": _node_label(node_id, formatted_properties),
-        "properties": formatted_properties,
-    }
-
-
-def _format_edge(
-    source_id: str,
-    target_id: str,
-    edge_type: str,
-    properties: Mapping[str, object],
-) -> dict[str, object]:
-    formatted_properties = dict(properties)
-    return {
-        "id": str(formatted_properties["id"]),
-        "source": source_id,
-        "target": target_id,
-        "type": edge_type,
-        "properties": formatted_properties,
-    }
-
-
-def _format_summary(summary_id: str, properties: Mapping[str, object]) -> dict[str, object]:
-    return {
-        "id": summary_id,
-        "text": _read_property(properties, "text"),
-        "summary_model": _read_property(properties, "summary_model"),
-        "embedding_model": _read_property(properties, "embedding_model"),
-        "embedding_dimensions": _read_int_property(properties, "embedding_dimensions"),
-        "source_hash": _read_property(properties, "source_hash"),
-    }
-
-
-def _format_anchor(
-    anchor_id: str,
-    anchor_properties: Mapping[str, object],
-    edge_properties: Mapping[str, object],
-    source_file: dict[str, object] | None,
-) -> dict[str, object]:
-    return {
-        "id": anchor_id,
-        "role": _read_property(edge_properties, "role"),
-        "start_line": _read_int_property(anchor_properties, "start_line"),
-        "start_col": _read_int_property(anchor_properties, "start_col"),
-        "end_line": _read_int_property(anchor_properties, "end_line"),
-        "end_col": _read_int_property(anchor_properties, "end_col"),
-        "source_file": source_file,
-        "properties": dict(anchor_properties),
-    }
-
-
-def _format_source_file(file_node: Mapping[str, object]) -> dict[str, object]:
-    properties = cast(Mapping[str, object], file_node["properties"])
-    return {
-        "id": file_node["id"],
-        "label": file_node["label"],
-        "relative_path": _read_property(properties, "relative_path"),
-        "language": _read_property(properties, "language"),
-        "content_hash": _read_property(properties, "content_hash"),
-        "position_encoding": _read_property(properties, "position_encoding"),
-    }
-
-
-def _anchor_sort_key(anchor: Mapping[str, object]) -> tuple[int, int, str]:
-    return (
-        _anchor_role_priority(str(anchor["role"])),
-        int(anchor["start_line"]),
-        str(anchor["id"]),
-    )
-
-
-def _anchor_role_priority(role: str) -> int:
-    priorities = {
-        "definition": 0,
-        "body": 1,
-        "name": 2,
-    }
-    return priorities.get(role, len(priorities))
-
-
-def _read_int_property(properties: Mapping[str, object], name: str) -> int:
-    return cast(int, properties[name])
-
-
-def _cosine_distance_to_similarity(distance: float) -> float:
-    return max(0.0, 1.0 - float(distance))
-
-
-def _node_label(node_id: str, properties: Mapping[str, object]) -> str:
-    node_type = _read_property(properties, "rigel_type")
-    label_properties = {
-        "Repository": "name",
-        "Module": "name",
-        "File": "relative_path",
-        "Entity": "display_name",
-        "Anchor": "role",
-        "Summary": "text",
-    }
-    return _read_property(properties, label_properties[node_type])

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from rigel_demo.entities import Repository
-from rigel_demo.graph.ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType
+from rigel_demo.graph.ir import GraphEdge, GraphIR, NodeType
 from rigel_demo.embedding import EmbeddingConfig, RigelEmbedding
 from rigel_demo.project.summaries import (
     SummaryEmbeddingClient,
@@ -16,63 +14,17 @@ from rigel_demo.project.summaries import (
     attach_retrieval_summaries,
 )
 from rigel_demo.java import JavaParseRequest, JavaSemanticEdgeRequest, enrich_java_semantic_edges, parse_java_file
-from rigel_demo.java.requests import (
-    DEFAULT_MODULE_ECOSYSTEM,
-    DEFAULT_MODULE_NAME,
-    DEFAULT_ZONE,
-    GENERATED_ZONE,
+from rigel_demo.project.incremental import (
+    incremental_node_ids,
+    java_file_changes,
+    select_incremental_graph,
+    summary_node_ids_for_targets,
+)
+from rigel_demo.project.java_targets import (
+    JavaFileIndexTarget,
+    iter_java_targets,
 )
 from rigel_demo.llm import LLMConfig, LLMConfigSection, RigelLLM
-
-
-IGNORED_DIRECTORY_NAMES = {
-    ".git",
-    ".hg",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".rigel",
-    ".ruff_cache",
-    ".svn",
-    ".tox",
-    ".venv",
-    "__pycache__",
-    "build",
-    "dist",
-    "node_modules",
-    "out",
-    "target",
-    "venv",
-}
-
-JAVA_SOURCE_ROOT_PATTERNS: tuple[tuple[str, ...], ...] = (
-    ("src", "main", "java"),
-    ("src", "test", "java"),
-    ("src", "generated", "java"),
-    ("generated", "src", "main", "java"),
-    ("generated-sources",),
-)
-MAVEN_MARKER_FILE_NAME = "pom.xml"
-GRADLE_MARKER_FILE_NAMES = {"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"}
-TEST_PATH_PARTS = {"test", "tests", "it", "integrationtest", "integration-test"}
-TOOLING_PATH_PARTS = {"tool", "tools", "tooling", "script", "scripts", "buildsrc", "build-logic"}
-VENDOR_PATH_PARTS = {"vendor", "third_party", "third-party", "external"}
-GENERATED_PATH_PARTS = {"generated", "generated-sources", "build", "out", "target"}
-GENERATED_SOURCE_MARKER_PARTS = {"generated", "generated-sources"}
-HASH_PREFIX = "sha256:"
-SEMANTIC_EDGE_TYPES = {EdgeType.DEPENDS_ON, EdgeType.SPECIALIZES, EdgeType.ALIASES}
-
-
-@dataclass(frozen=True, slots=True)
-class JavaFileIndexTarget:
-    """单个 Java 文件在仓库内的模块和分区归属。"""
-
-    source_path: Path
-    relative_path: str
-    module_name: str
-    module_root_path: str
-    module_ecosystem: str
-    module_zone: str
-    file_zone: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,34 +33,6 @@ class JavaStructureGraphResult:
 
     graph: GraphIR
     indexed_file_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class JavaFileChangeSet:
-    """增量索引中的 Java 文件变更分类。"""
-
-    added_files: list[str]
-    modified_files: list[str]
-    deleted_files: list[str]
-    skipped_files: list[str]
-
-    @property
-    def changed_existing_files(self) -> list[str]:
-        """需要重新解析和写入的新增或修改文件。"""
-
-        return self.added_files + self.modified_files
-
-    @property
-    def changed_existing_file_paths(self) -> set[str]:
-        """需要交给语义边补全器处理的新增或修改文件路径。"""
-
-        return set(self.changed_existing_files)
-
-    @property
-    def indexed_file_count(self) -> int:
-        """本次需要重新写入图谱的文件数量。"""
-
-        return len(self.changed_existing_files)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +78,7 @@ def index_repository(
     )
     structure_result = _build_java_structure_graph(
         repository_name=resolved_repository_path.name,
-        targets=_iter_java_targets(resolved_repository_path),
+        targets=iter_java_targets(resolved_repository_path),
     )
 
     if structure_result.indexed_file_count > 0:
@@ -185,8 +109,8 @@ def index_repository_incremental(
     """构建新增和修改 Java 文件对应的可写入增量图谱。"""
 
     resolved_repository_path = repository_path.resolve()
-    targets = _iter_java_targets(resolved_repository_path)
-    file_changes = _java_file_changes(targets, previous_file_hashes)
+    targets = iter_java_targets(resolved_repository_path)
+    file_changes = java_file_changes(targets, previous_file_hashes)
 
     if not file_changes.changed_existing_files:
         return RepositoryIncrementalIndexResult(
@@ -218,7 +142,7 @@ def index_repository_incremental(
         target_file_paths=changed_file_paths,
     )
 
-    selected_node_ids = _incremental_node_ids(full_graph, changed_file_paths)
+    selected_node_ids = incremental_node_ids(full_graph, changed_file_paths)
     # Summary 只为本次要写入的结构节点生成，避免未变化文件重复调用模型。
     summary_target_node_ids = {
         node.id
@@ -231,10 +155,10 @@ def index_repository_incremental(
         summary_client=active_summary_client,
         target_node_ids=summary_target_node_ids,
     )
-    selected_node_ids.update(_summary_node_ids_for_targets(full_graph, summary_target_node_ids))
+    selected_node_ids.update(summary_node_ids_for_targets(full_graph, summary_target_node_ids))
 
     return RepositoryIncrementalIndexResult(
-        graph=_select_incremental_graph(full_graph, selected_node_ids),
+        graph=select_incremental_graph(full_graph, selected_node_ids),
         added_files=file_changes.added_files,
         modified_files=file_changes.modified_files,
         deleted_files=file_changes.deleted_files,
@@ -274,241 +198,6 @@ def _java_parse_request(repository_name: str, target: JavaFileIndexTarget) -> Ja
         module_ecosystem=target.module_ecosystem,
         zone=target.module_zone,
         file_zone=target.file_zone,
-    )
-
-
-def _iter_java_targets(repository_path: Path) -> list[JavaFileIndexTarget]:
-    # 排序让索引输出在不同文件系统遍历顺序下保持稳定，便于测试和演示复现。
-    return sorted(
-        (
-            _java_file_target(repository_path, path)
-            for path in repository_path.rglob("*.java")
-            if path.is_file() and not _is_ignored_path(path.relative_to(repository_path))
-        ),
-        key=lambda target: target.relative_path,
-    )
-
-
-def _is_ignored_path(relative_path: Path) -> bool:
-    parts = {part.lower() for part in relative_path.parts}
-    ignored_parts = parts & IGNORED_DIRECTORY_NAMES
-    if not ignored_parts:
-        return False
-    # target/build/out 通常跳过，但 generated-sources 是 Java 工程里真实可索引的生成源码入口。
-    if ignored_parts <= {"build", "out", "target"} and parts & GENERATED_SOURCE_MARKER_PARTS:
-        return False
-    return True
-
-
-def _java_file_target(repository_path: Path, source_path: Path) -> JavaFileIndexTarget:
-    relative_path = source_path.relative_to(repository_path)
-    module_root = _detect_module_root(repository_path, relative_path)
-    source_root = _detect_java_source_root(relative_path.relative_to(module_root))
-    module_relative_path = relative_path.relative_to(module_root)
-    file_zone = _detect_file_zone(module_relative_path, source_root=source_root)
-    module_name = _module_name(module_root)
-    module_zone = _module_zone(file_zone)
-    return JavaFileIndexTarget(
-        source_path=source_path,
-        relative_path=relative_path.as_posix(),
-        module_name=module_name,
-        module_root_path=module_root.as_posix(),
-        module_ecosystem=_detect_module_ecosystem(repository_path, module_root),
-        module_zone=module_zone,
-        file_zone=file_zone,
-    )
-
-
-def _detect_module_root(repository_path: Path, relative_path: Path) -> Path:
-    parent_parts = relative_path.parts[:-1]
-    # 从文件向仓库根回溯，优先选择最近的 Maven/Gradle 标记作为模块根。
-    for part_count in range(len(parent_parts), -1, -1):
-        candidate = Path(*parent_parts[:part_count]) if part_count else Path(".")
-        absolute_candidate = repository_path / candidate
-        if _has_module_marker(absolute_candidate):
-            return candidate
-    return Path(".")
-
-
-def _has_module_marker(path: Path) -> bool:
-    return (path / MAVEN_MARKER_FILE_NAME).exists() or any((path / marker).exists() for marker in GRADLE_MARKER_FILE_NAMES)
-
-
-def _detect_java_source_root(module_relative_path: Path) -> Path:
-    parts = module_relative_path.parts
-    for pattern in JAVA_SOURCE_ROOT_PATTERNS:
-        pattern_length = len(pattern)
-        if len(parts) >= pattern_length and tuple(part.lower() for part in parts[:pattern_length]) == pattern:
-            return Path(*parts[:pattern_length])
-    return Path(".")
-
-
-def _detect_file_zone(module_relative_path: Path, *, source_root: Path) -> str:
-    parts = {part.lower() for part in module_relative_path.parts}
-    source_root_parts = {part.lower() for part in source_root.parts}
-    if parts & GENERATED_PATH_PARTS or source_root_parts & GENERATED_PATH_PARTS:
-        return GENERATED_ZONE
-    if parts & VENDOR_PATH_PARTS:
-        return "vendor"
-    if parts & TOOLING_PATH_PARTS:
-        return "tooling"
-    if parts & TEST_PATH_PARTS:
-        return "test"
-    return DEFAULT_ZONE
-
-
-def _module_zone(file_zone: str) -> Literal["prod", "test", "tooling", "vendor", "generated"]:
-    if file_zone == "vendor":
-        return "vendor"
-    if file_zone == "tooling":
-        return "tooling"
-    return DEFAULT_ZONE
-
-
-def _module_name(module_root: Path) -> str:
-    if module_root == Path("."):
-        return DEFAULT_MODULE_NAME
-    return module_root.as_posix().replace("/", ":")
-
-
-def _detect_module_ecosystem(repository_path: Path, module_root: Path) -> str:
-    absolute_module_root = repository_path / module_root
-    if (absolute_module_root / MAVEN_MARKER_FILE_NAME).exists():
-        return DEFAULT_MODULE_ECOSYSTEM
-    if any((absolute_module_root / marker).exists() for marker in GRADLE_MARKER_FILE_NAMES):
-        return "gradle"
-    return DEFAULT_MODULE_ECOSYSTEM
-
-
-def _current_file_hashes(targets: list[JavaFileIndexTarget]) -> dict[str, str]:
-    return {
-        target.relative_path: _content_hash(target.source_path.read_bytes())
-        for target in targets
-    }
-
-
-def _java_file_changes(
-    targets: list[JavaFileIndexTarget],
-    previous_file_hashes: dict[str, str],
-) -> JavaFileChangeSet:
-    current_file_hashes = _current_file_hashes(targets)
-    current_paths = set(current_file_hashes)
-    previous_paths = set(previous_file_hashes)
-    stable_paths = current_paths & previous_paths
-
-    return JavaFileChangeSet(
-        added_files=sorted(current_paths - previous_paths),
-        modified_files=sorted(
-            path
-            for path in stable_paths
-            if current_file_hashes[path] != previous_file_hashes[path]
-        ),
-        deleted_files=sorted(previous_paths - current_paths),
-        skipped_files=sorted(
-            path
-            for path in stable_paths
-            if current_file_hashes[path] == previous_file_hashes[path]
-        ),
-    )
-
-
-def _content_hash(content: bytes) -> str:
-    return f"{HASH_PREFIX}{hashlib.sha256(content).hexdigest()}"
-
-
-def _incremental_node_ids(graph: GraphIR, changed_file_paths: set[str]) -> set[str]:
-    nodes_by_id = {node.id: node for node in graph.nodes}
-    file_ids = {
-        node.id
-        for node in graph.nodes
-        if node.type == NodeType.FILE and node.properties["relative_path"] in changed_file_paths
-    }
-    children_by_parent: dict[str, list[str]] = {}
-    parent_by_child: dict[str, str] = {}
-    for edge in graph.edges:
-        if edge.type != EdgeType.CONTAINS:
-            continue
-        children_by_parent.setdefault(edge.source_id, []).append(edge.target_id)
-        parent_by_child[edge.target_id] = edge.source_id
-
-    selected_node_ids: set[str] = set()
-    for file_id in file_ids:
-        # 写入文件子图时保留 Repository/Module/File 祖先，保证数据库中可直接 MERGE 层级边。
-        selected_node_ids.update(_ancestor_node_ids(file_id, parent_by_child, nodes_by_id))
-        selected_node_ids.update(_descendant_node_ids(file_id, children_by_parent))
-
-    for edge in graph.edges:
-        if edge.type == EdgeType.HAS_ANCHOR and edge.source_id in selected_node_ids:
-            # Anchor 不在 CONTAINS 树内，需要沿 HAS_ANCHOR 单独纳入增量写入集合。
-            selected_node_ids.add(edge.target_id)
-    return selected_node_ids
-
-
-def _ancestor_node_ids(
-    node_id: str,
-    parent_by_child: dict[str, str],
-    nodes_by_id: dict[str, GraphNode],
-) -> set[str]:
-    ancestors: set[str] = set()
-    current_node_id: str | None = node_id
-    while current_node_id is not None and current_node_id not in ancestors:
-        node = nodes_by_id[current_node_id]
-        if node.type in {NodeType.REPOSITORY, NodeType.MODULE, NodeType.FILE}:
-            ancestors.add(current_node_id)
-        current_node_id = parent_by_child.get(current_node_id)
-    return ancestors
-
-
-def _descendant_node_ids(node_id: str, children_by_parent: dict[str, list[str]]) -> set[str]:
-    descendants: set[str] = set()
-    stack = [node_id]
-    while stack:
-        current_node_id = stack.pop()
-        if current_node_id in descendants:
-            continue
-        descendants.add(current_node_id)
-        stack.extend(children_by_parent.get(current_node_id, []))
-    return descendants
-
-
-def _summary_node_ids_for_targets(graph: GraphIR, target_node_ids: set[str]) -> set[str]:
-    return {
-        edge.source_id
-        for edge in graph.edges
-        if edge.type == EdgeType.DESCRIBES and edge.target_id in target_node_ids
-    }
-
-
-def _select_incremental_graph(graph: GraphIR, selected_node_ids: set[str]) -> GraphIR:
-    selected_nodes = [
-        node
-        for node in graph.nodes
-        if node.id in selected_node_ids
-    ]
-    incremental_owner_node_ids = {
-        node.id
-        for node in selected_nodes
-        if node.type in {NodeType.FILE, NodeType.ENTITY}
-    }
-    selected_edges = [
-        edge
-        for edge in graph.edges
-        if _should_select_incremental_edge(edge, selected_node_ids, incremental_owner_node_ids)
-    ]
-    return GraphIR(nodes=selected_nodes, edges=selected_edges)
-
-
-def _should_select_incremental_edge(
-    edge: GraphEdge,
-    selected_node_ids: set[str],
-    incremental_owner_node_ids: set[str],
-) -> bool:
-    if edge.source_id in selected_node_ids and edge.target_id in selected_node_ids:
-        return True
-    # 语义边可能连向未变化文件；保留这类一跳关系，避免增量后变更实体失去跨文件上下文。
-    return (
-        edge.type in SEMANTIC_EDGE_TYPES
-        and (edge.source_id in incremental_owner_node_ids or edge.target_id in incremental_owner_node_ids)
     )
 
 

@@ -4,22 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
-import subprocess
 import webbrowser
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Literal, Sequence
+from typing import TYPE_CHECKING, Literal, Sequence
 
 from rigel_demo.config_document import (
     RIGEL_CONFIG_FILE_NAME,
     RIGEL_WORKSPACE_DIRECTORY_NAME,
-    ConfigDocumentErrorMessages,
-    read_config_document,
 )
-from rigel_demo.llm.config import DEFAULT_CHAT_SYSTEM_PROMPT, DEFAULT_SUMMARY_SYSTEM_PROMPT
+from rigel_demo.cli_config import DEFAULT_CONFIG_DOCUMENT, WebConfig, WebConfigurationError
+from rigel_demo.cli_frontend import FrontendBuildResult, build_frontend
 
 if TYPE_CHECKING:
     from rigel_demo.storage.falkordb.store import FalkorDBStore
@@ -29,51 +26,7 @@ FALKORDB_DATABASE_FILE_NAME = "falkordb.db"
 WORKSPACE_STATE_FILE_NAME = "rigel.json"
 WEB_STATIC_DIRECTORY_NAME = "web/static"
 DEFAULT_GRAPH_NAME = "rigel"
-WEB_CONFIG_SECTION_NAME = "web"
 IndexMode = Literal["full", "incremental"]
-DEFAULT_CONFIG_DOCUMENT = {
-    "web": {
-        "host": "127.0.0.1",
-        "port": 5000,
-        "open_browser": True,
-    },
-    "graphrag": {
-        "falkordb_host": "127.0.0.1",
-        "falkordb_port": 6379,
-        "falkordb_username": None,
-        "falkordb_password": None,
-    },
-    "chat": {
-        "provider": "openai",
-        "model": "gpt-5.2",
-        "api_key": "sk-your-openai-key",
-        "base_url": None,
-        "timeout_seconds": 60,
-        "temperature": None,
-        "max_output_tokens": None,
-        "system_prompt": DEFAULT_CHAT_SYSTEM_PROMPT,
-    },
-    "summary": {
-        "provider": "openai",
-        "model": "gpt-5.2",
-        "api_key": "sk-your-openai-key",
-        "base_url": None,
-        "timeout_seconds": 60,
-        "temperature": 0,
-        "max_output_tokens": 300,
-        "system_prompt": DEFAULT_SUMMARY_SYSTEM_PROMPT,
-    },
-    "embedding": {
-        "provider": "openai",
-        "format": "openai_embeddings",
-        "model": "text-embedding-3-small",
-        "api_key": "sk-your-openai-key",
-        "base_url": None,
-        "dimensions": 512,
-        "timeout_seconds": 60,
-        "batch_size": 64,
-    },
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,30 +81,6 @@ class WorkspacePaths:
             database_path=workspace_path / FALKORDB_DATABASE_FILE_NAME,
             state_path=workspace_path / WORKSPACE_STATE_FILE_NAME,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class WebConfig:
-    """Web 演示后端运行配置。"""
-
-    host: str
-    port: int
-    open_browser: bool
-
-    @classmethod
-    def from_repository(cls, repository_path: Path) -> "WebConfig":
-        """从目标仓库 `.rigel/config.json` 读取 Web 启动配置。"""
-
-        config_data = _read_web_config(repository_path)
-        return cls(
-            host=_require_web_string(config_data, "host"),
-            port=_require_web_port(config_data.get("port")),
-            open_browser=_require_web_bool(config_data.get("open_browser"), "open_browser"),
-        )
-
-
-class WebConfigurationError(ValueError):
-    """Web 配置不可用。"""
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -417,75 +346,6 @@ def _handle_web_command(_args: argparse.Namespace) -> int:
     return 0
 
 
-@dataclass(frozen=True, slots=True)
-class FrontendBuildResult:
-    """前端构建结果。"""
-
-    success: bool
-    static_path: Path
-    message: str = ""
-
-
-def build_frontend(static_path: Path) -> FrontendBuildResult:
-    """把内置前端构建到当前仓库 `.rigel` 工作目录。"""
-
-    frontend_path = Path(__file__).resolve().parent / "web" / "frontend"
-    package_json_path = frontend_path / "package.json"
-    if not package_json_path.exists():
-        return FrontendBuildResult(
-            success=False,
-            static_path=static_path,
-            message=f"未找到前端源码目录: {frontend_path}",
-        )
-
-    npm_path = shutil.which("npm")
-    if npm_path is None:
-        return FrontendBuildResult(
-            success=False,
-            static_path=static_path,
-            message="未找到 npm，请先安装 Node.js/npm，并确认 npm --version 可用后再构建 Rigel Web 前端。",
-        )
-
-    node_modules_path = frontend_path / "node_modules"
-    if not node_modules_path.exists():
-        install_result = subprocess.run(
-            [npm_path, "install"],
-            cwd=frontend_path,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if install_result.returncode != 0:
-            return FrontendBuildResult(
-                success=False,
-                static_path=static_path,
-                message=_frontend_command_error("前端依赖安装失败", install_result),
-            )
-
-    build_result = subprocess.run(
-        [npm_path, "run", "build", "--", "--outDir", str(static_path), "--emptyOutDir"],
-        cwd=frontend_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if build_result.returncode != 0:
-        return FrontendBuildResult(
-            success=False,
-            static_path=static_path,
-            message=_frontend_command_error("前端构建失败", build_result),
-        )
-
-    return FrontendBuildResult(success=True, static_path=static_path)
-
-
-def _frontend_command_error(title: str, result: subprocess.CompletedProcess[str]) -> str:
-    output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
-    if not output:
-        return title
-    return f"{title}:\n{output}"
-
-
 def _write_default_config_if_missing(config_path: Path) -> bool:
     """只在缺失时写入默认配置，避免覆盖用户已填写的密钥与模型。"""
 
@@ -554,47 +414,6 @@ def _remove_database_artifacts(database_path: Path) -> None:
 
     database_path.unlink(missing_ok=True)
     database_path.with_name(f"{database_path.name}.settings").unlink(missing_ok=True)
-
-
-def _read_web_config(repository_path: Path) -> dict[str, Any]:
-    """读取 `.rigel/config.json` 中的 Web 配置段。"""
-
-    config_document = read_config_document(
-        repository_path,
-        messages=ConfigDocumentErrorMessages(
-            missing="未找到配置文件，请先执行 rigel init 并填写配置：{config_path}",
-            read="读取 Web 配置文件失败：{config_path}",
-            invalid_json="Web 配置文件不是合法 JSON：{config_path}",
-            root="Web 配置文件根节点必须是 JSON 对象",
-        ),
-        missing_error_type=FileNotFoundError,
-        error_type=WebConfigurationError,
-    )
-    web_config = config_document.get(WEB_CONFIG_SECTION_NAME)
-    if not isinstance(web_config, dict):
-        raise WebConfigurationError(f"配置文件必须包含对象字段：{WEB_CONFIG_SECTION_NAME}")
-    return web_config
-
-
-def _require_web_string(config_data: dict[str, Any], name: str) -> str:
-    value = config_data.get(name)
-    if not isinstance(value, str) or not value.strip():
-        raise WebConfigurationError(f"web.{name} 必须是非空字符串")
-    return value.strip()
-
-
-def _require_web_port(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise WebConfigurationError("web.port 必须是整数")
-    if value < 1 or value > 65_535:
-        raise WebConfigurationError("web.port 必须在 1 到 65535 之间")
-    return value
-
-
-def _require_web_bool(value: object, name: str) -> bool:
-    if not isinstance(value, bool):
-        raise WebConfigurationError(f"web.{name} 必须是布尔值")
-    return value
 
 
 if __name__ == "__main__":

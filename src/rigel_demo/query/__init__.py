@@ -5,8 +5,10 @@ from rigel_demo.query.service import (
     DEFAULT_RECALL_EXPANSION_LIMIT,
     DEFAULT_RECALL_LIMIT,
     GraphExpansionDirection,
-    RepositorySourceReader,
     RigelGraphReader,
+)
+from rigel_demo.query.source_reader import (
+    RepositorySourceReader,
     SourceFileNotFoundError,
     SourceLineRangeError,
     SourcePathError,
