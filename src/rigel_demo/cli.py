@@ -91,7 +91,6 @@ class IndexResult:
     skipped_file_count: int = 0
     deleted_node_count: int = 0
     duration_ms: int = 0
-    incremental_fallback: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +161,10 @@ def index_repository_workspace(repository_path: Path | None = None, *, increment
     workspace_path.mkdir(parents=True, exist_ok=True)
     started_at = perf_counter()
 
-    if incremental and database_artifact_exists(database_path):
+    if incremental:
+        if not database_artifact_exists(database_path):
+            raise FileNotFoundError(f"未找到可增量索引的图数据库，请先执行 rigel index：{database_path}")
+        # 增量模式复用旧数据库中的文件哈希，先删旧子图再写新子图，保持演示实现简单可观察。
         store = FalkorDBStore.connect(
             FalkorDBConfig(
                 graph_name=DEFAULT_GRAPH_NAME,
@@ -219,7 +221,6 @@ def index_repository_workspace(repository_path: Path | None = None, *, increment
         graph_edge_count=len(index_result.graph.edges),
         index_mode="full",
         duration_ms=_duration_ms(started_at),
-        incremental_fallback=incremental,
     )
     _write_workspace_state(state_path, result)
     return result
@@ -249,7 +250,7 @@ def _build_parser() -> argparse.ArgumentParser:
     index_parser.add_argument(
         "--incremental",
         action="store_true",
-        help="基于已有图数据库执行演示级增量索引；缺少数据库时自动执行全量索引。",
+        help="基于已有图数据库执行演示级增量索引。",
     )
     index_parser.set_defaults(command_handler=_handle_index_command)
 
@@ -343,6 +344,7 @@ def _handle_web_command(_args: argparse.Namespace) -> int:
     print(f"前端目录: {frontend_result.static_path}", flush=True)
     print(f"访问地址: {url}", flush=True)
     if web_config.open_browser:
+        # 浏览器打开失败不影响后端启动；webbrowser 会按当前系统可用性自行处理。
         webbrowser.open(url)
 
     uvicorn.run(create_app(repository_path), host=web_config.host, port=web_config.port)
@@ -439,11 +441,7 @@ def _write_workspace_state(state_path: Path, result: IndexResult) -> None:
         "indexed_at": datetime.now(UTC).isoformat(),
         "last_index_mode": result.index_mode,
         "last_index_result": index_result_payload(result),
-        "last_incremental_result": (
-            index_result_payload(result)
-            if result.index_mode == "incremental" or result.incremental_fallback
-            else None
-        ),
+        "last_incremental_result": index_result_payload(result) if result.index_mode == "incremental" else None,
     }
     state_path.write_text(
         json.dumps(state, ensure_ascii=False, indent=2) + "\n",
@@ -466,15 +464,12 @@ def index_result_payload(result: IndexResult) -> dict[str, object]:
         "graph_node_count": result.graph_node_count,
         "graph_edge_count": result.graph_edge_count,
         "duration_ms": result.duration_ms,
-        "incremental_fallback": result.incremental_fallback,
     }
 
 
 def _index_mode_label(result: IndexResult) -> str:
     if result.index_mode == "incremental":
         return "增量"
-    if result.incremental_fallback:
-        return "全量（增量首次初始化）"
     return "全量"
 
 

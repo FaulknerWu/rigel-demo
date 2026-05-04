@@ -56,6 +56,16 @@ class CliIndexTest(TestCase):
             with self.assertRaisesRegex(FileNotFoundError, "rigel init"):
                 index_repository_workspace(Path(workspace))
 
+    def test_incremental_index_requires_existing_database(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            config_path = repository_path / ".rigel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(json.dumps(DEFAULT_CONFIG_DOCUMENT, ensure_ascii=False) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(FileNotFoundError, "可增量索引"):
+                index_repository_workspace(repository_path, incremental=True)
+
     def test_index_repository_workspace_writes_database_and_state(self) -> None:
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)

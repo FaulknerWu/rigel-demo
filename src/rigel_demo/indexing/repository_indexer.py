@@ -164,6 +164,7 @@ def index_repository_incremental(
 
     current_paths = set(current_file_hashes)
     previous_paths = set(previous_file_hashes)
+    # 增量索引以文件哈希为边界：删除由存量数据库清理，新增/修改才需要重新解析和写入。
     added_files = sorted(current_paths - previous_paths)
     modified_files = sorted(
         path
@@ -196,6 +197,7 @@ def index_repository_incremental(
     )
 
     full_graph = _base_graph(repository_name)
+    # 语义边依赖全仓实体索引；即使最终只写入变更文件，也需要用完整结构图解析跨文件目标。
     for target in targets:
         request = JavaParseRequest(
             repository_name=repository_name,
@@ -217,6 +219,7 @@ def index_repository_incremental(
     )
 
     selected_node_ids = _incremental_node_ids(full_graph, changed_file_paths)
+    # Summary 只为本次要写入的结构节点生成，避免未变化文件重复调用模型。
     summary_target_node_ids = {
         node.id
         for node in full_graph.nodes
@@ -264,6 +267,7 @@ def _is_ignored_path(relative_path: Path) -> bool:
     ignored_parts = parts & IGNORED_DIRECTORY_NAMES
     if not ignored_parts:
         return False
+    # target/build/out 通常跳过，但 generated-sources 是 Java 工程里真实可索引的生成源码入口。
     if ignored_parts <= {"build", "out", "target"} and parts & GENERATED_SOURCE_MARKER_PARTS:
         return False
     return True
@@ -290,6 +294,7 @@ def _java_file_target(repository_path: Path, source_path: Path) -> JavaFileIndex
 
 def _detect_module_root(repository_path: Path, relative_path: Path) -> Path:
     parent_parts = relative_path.parts[:-1]
+    # 从文件向仓库根回溯，优先选择最近的 Maven/Gradle 标记作为模块根。
     for part_count in range(len(parent_parts), -1, -1):
         candidate = Path(*parent_parts[:part_count]) if part_count else Path(".")
         absolute_candidate = repository_path / candidate
@@ -364,7 +369,7 @@ def _incremental_node_ids(graph: GraphIR, changed_file_paths: set[str]) -> set[s
     file_ids = {
         node.id
         for node in graph.nodes
-        if node.type == NodeType.FILE and node.properties.get("relative_path") in changed_file_paths
+        if node.type == NodeType.FILE and node.properties["relative_path"] in changed_file_paths
     }
     children_by_parent: dict[str, list[str]] = {}
     parent_by_child: dict[str, str] = {}
@@ -376,11 +381,13 @@ def _incremental_node_ids(graph: GraphIR, changed_file_paths: set[str]) -> set[s
 
     selected_node_ids: set[str] = set()
     for file_id in file_ids:
+        # 写入文件子图时保留 Repository/Module/File 祖先，保证数据库中可直接 MERGE 层级边。
         selected_node_ids.update(_ancestor_node_ids(file_id, parent_by_child, nodes_by_id))
         selected_node_ids.update(_descendant_node_ids(file_id, children_by_parent))
 
     for edge in graph.edges:
         if edge.type == EdgeType.HAS_ANCHOR and edge.source_id in selected_node_ids:
+            # Anchor 不在 CONTAINS 树内，需要沿 HAS_ANCHOR 单独纳入增量写入集合。
             selected_node_ids.add(edge.target_id)
     return selected_node_ids
 
@@ -393,8 +400,8 @@ def _ancestor_node_ids(
     ancestors: set[str] = set()
     current_node_id: str | None = node_id
     while current_node_id is not None and current_node_id not in ancestors:
-        node = nodes_by_id.get(current_node_id)
-        if node is not None and node.type in {NodeType.REPOSITORY, NodeType.MODULE, NodeType.FILE}:
+        node = nodes_by_id[current_node_id]
+        if node.type in {NodeType.REPOSITORY, NodeType.MODULE, NodeType.FILE}:
             ancestors.add(current_node_id)
         current_node_id = parent_by_child.get(current_node_id)
     return ancestors
@@ -446,6 +453,7 @@ def _should_select_incremental_edge(
 ) -> bool:
     if edge.source_id in selected_node_ids and edge.target_id in selected_node_ids:
         return True
+    # 语义边可能连向未变化文件；保留这类一跳关系，避免增量后变更实体失去跨文件上下文。
     return (
         edge.type in SEMANTIC_EDGE_TYPES
         and (edge.source_id in incremental_owner_node_ids or edge.target_id in incremental_owner_node_ids)
