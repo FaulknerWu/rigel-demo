@@ -1,13 +1,15 @@
 import hashlib
 from pathlib import Path
+from threading import Lock
 from tempfile import TemporaryDirectory
+from time import sleep
 from unittest import TestCase
 from unittest.mock import patch
 
 from rigel_demo.entities import Entity, Module, Summary
 from rigel_demo.graph import EdgeType, GraphEdge, NodeType
 from rigel_demo.graph.ir import GraphIR, GraphNode
-from rigel_demo.embedding import EmbeddingConfig, EmbeddingFormat
+from rigel_demo.embedding import EmbeddingConfig, EmbeddingFormat, EmbeddingInputMode
 from rigel_demo.project import repository_indexer
 from rigel_demo.project.summaries import attach_retrieval_summaries
 from rigel_demo.java.requests import DEFAULT_LSP_TIMEOUT_SECONDS, GENERATED_ZONE
@@ -15,6 +17,40 @@ from rigel_demo.llm import LLMConfig, LLMConfigSection, LLMMessage
 
 
 class RepositoryIndexerTest(TestCase):
+    def test_index_repository_reports_file_progress(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            first_path = repository_path / "src" / "main" / "java" / "demo" / "First.java"
+            second_path = repository_path / "src" / "main" / "java" / "demo" / "Second.java"
+            first_path.parent.mkdir(parents=True)
+            first_path.write_text("package demo; public class First {}\n", encoding="utf-8")
+            second_path.write_text("package demo; public class Second {}\n", encoding="utf-8")
+            progress_events: list[tuple[str, int, int, str]] = []
+
+            with patch.object(repository_indexer, "enrich_java_semantic_edges") as enrich_java_semantic_edges:
+                enrich_java_semantic_edges.side_effect = lambda graph, *, request: graph
+
+                repository_indexer.index_repository(
+                    repository_path,
+                    embedding_client=_FakeEmbeddingClient(),
+                    summary_client=_FakeSummaryClient(),
+                    progress_reporter=lambda progress: progress_events.append(
+                        (progress.stage, progress.current, progress.total, progress.detail)
+                    ),
+                )
+
+        java_parse_events = [event for event in progress_events if event[0] == "java_parse"]
+        self.assertEqual(
+            java_parse_events,
+            [
+                ("java_parse", 1, 2, "src/main/java/demo/First.java"),
+                ("java_parse", 2, 2, "src/main/java/demo/Second.java"),
+            ],
+        )
+        self.assertIn("semantic_edges", {event[0] for event in progress_events})
+        self.assertIn("summary_text", {event[0] for event in progress_events})
+        self.assertIn("summary_embedding", {event[0] for event in progress_events})
+
     def test_index_repository_uses_real_lsp_client_by_default(self) -> None:
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
@@ -302,9 +338,73 @@ class RepositoryIndexerTest(TestCase):
         self.assertEqual(len(embedding_client.text_batches), 1)
         self.assertEqual(len(summary_client.messages), 1)
 
+    def test_attach_retrieval_summaries_generates_texts_concurrently(self) -> None:
+        embedding_client = _FakeEmbeddingClient()
+        summary_client = _ConcurrentSummaryClient(concurrent_requests=4)
+        graph = GraphIR()
+        modules = [
+            Module(
+                module_id=f"module:demo:module-{index}",
+                name=f"module-{index}",
+                root_path=f"module-{index}",
+                ecosystem="maven",
+                zone="prod",
+            )
+            for index in range(4)
+        ]
+        for module in modules:
+            graph.add_node(module)
+
+        attach_retrieval_summaries(
+            graph,
+            embedding_client=embedding_client,
+            summary_client=summary_client,
+        )
+
+        self.assertGreater(summary_client.max_active_requests, 1)
+        self.assertEqual(
+            [node.properties["text"] for node in _summary_nodes(graph)],
+            [f"摘要 {module.module_id}" for module in modules],
+        )
+
+    def test_attach_retrieval_summaries_ignores_batch_size_for_string_embedding_input(self) -> None:
+        embedding_client = _FakeEmbeddingClient(input_mode=EmbeddingInputMode.STRING, batch_size=64)
+        summary_client = _FakeSummaryClient()
+        graph = GraphIR()
+        first_module = Module(
+            module_id="module:demo:first",
+            name="first",
+            root_path="first",
+            ecosystem="maven",
+            zone="prod",
+        )
+        second_module = Module(
+            module_id="module:demo:second",
+            name="second",
+            root_path="second",
+            ecosystem="maven",
+            zone="prod",
+        )
+        graph.add_node(first_module)
+        graph.add_node(second_module)
+
+        attach_retrieval_summaries(
+            graph,
+            embedding_client=embedding_client,
+            summary_client=summary_client,
+        )
+
+        self.assertEqual([len(batch) for batch in embedding_client.text_batches], [1, 1])
+
 
 class _FakeEmbeddingClient:
-    def __init__(self, *, dimensions: int = 3) -> None:
+    def __init__(
+        self,
+        *,
+        dimensions: int = 3,
+        input_mode: EmbeddingInputMode = EmbeddingInputMode.ARRAY,
+        batch_size: int = 8,
+    ) -> None:
         self.dimensions = dimensions
         self.config = EmbeddingConfig(
             provider="openai",
@@ -314,7 +414,8 @@ class _FakeEmbeddingClient:
             base_url=None,
             dimensions=dimensions,
             timeout_seconds=1,
-            batch_size=8,
+            batch_size=batch_size,
+            input_mode=input_mode,
         )
         self.text_batches: list[list[str]] = []
 
@@ -339,6 +440,36 @@ class _FakeSummaryClient:
     def generate_reply(self, messages: list[LLMMessage]) -> str:
         self.messages.append(messages)
         return f"模型摘要：{messages[-1].content[:20]}"
+
+
+class _ConcurrentSummaryClient(_FakeSummaryClient):
+    def __init__(self, *, concurrent_requests: int) -> None:
+        super().__init__()
+        self.config = LLMConfig(
+            provider="openai",
+            model="summary-model",
+            api_key="fake-key",
+            base_url=None,
+            timeout_seconds=1,
+            system_prompt="摘要提示",
+            section=LLMConfigSection.SUMMARY,
+            concurrent_requests=concurrent_requests,
+        )
+        self._lock = Lock()
+        self._active_requests = 0
+        self.max_active_requests = 0
+
+    def generate_reply(self, messages: list[LLMMessage]) -> str:
+        with self._lock:
+            self._active_requests += 1
+            self.max_active_requests = max(self.max_active_requests, self._active_requests)
+        try:
+            sleep(0.02)
+            self.messages.append(messages)
+            return f"摘要 {_prompt_node_id(messages[-1].content)}"
+        finally:
+            with self._lock:
+                self._active_requests -= 1
 
 
 def _demo_module() -> Module:
@@ -407,6 +538,13 @@ def _has_describes_edge(graph: GraphIR, summary_id: str, target_id: str) -> bool
         and edge.target_id == target_id
         for edge in graph.edges
     )
+
+
+def _prompt_node_id(prompt: str) -> str:
+    for line in prompt.splitlines():
+        if line.startswith("节点 ID："):
+            return line.removeprefix("节点 ID：")
+    raise AssertionError("摘要 Prompt 缺少节点 ID")
 
 
 def _hash(source: str) -> str:

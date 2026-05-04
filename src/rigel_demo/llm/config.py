@@ -17,6 +17,7 @@ DEFAULT_SUMMARY_SYSTEM_PROMPT = (
     "你是 Rigel 的代码图谱摘要生成器。请基于给出的节点结构信息生成一条简洁、准确、"
     "适合语义检索的中文摘要，只输出摘要正文。"
 )
+MAX_SUMMARY_CONCURRENT_REQUESTS = 32
 
 
 class LLMConfigSection(StrEnum):
@@ -42,6 +43,7 @@ class LLMConfig:
     system_prompt: str
     temperature: float | None = None
     max_output_tokens: int | None = None
+    concurrent_requests: int = 1
     section: LLMConfigSection = LLMConfigSection.CHAT
 
     @classmethod
@@ -69,6 +71,7 @@ class LLMConfig:
             system_prompt=reader.required_string("system_prompt"),
             temperature=reader.nullable_float("temperature"),
             max_output_tokens=reader.nullable_positive_int("max_output_tokens"),
+            concurrent_requests=_read_concurrent_requests(reader, normalized_section),
             section=normalized_section,
         )
 
@@ -106,3 +109,9 @@ def _read_base_url(reader: ConfigFieldReader, provider: str) -> str | None:
     if provider != "openai":
         raise LLMConfigurationError(f"自定义 Chat Completions 提供商必须配置 {reader.field_path('base_url')}")
     return None
+
+
+def _read_concurrent_requests(reader: ConfigFieldReader, section: LLMConfigSection) -> int:
+    if section != LLMConfigSection.SUMMARY:
+        return 1
+    return reader.bounded_int("concurrent_requests", minimum=1, maximum=MAX_SUMMARY_CONCURRENT_REQUESTS)

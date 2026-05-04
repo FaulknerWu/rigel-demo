@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from rigel_demo.entities import Anchor, Entity, File, Module, Repository
 from rigel_demo.graph import EdgeType, GraphEdge, GraphIR
-from rigel_demo.embedding import EmbeddingConfig, EmbeddingConfigurationError, EmbeddingFormat
+from rigel_demo.embedding import EmbeddingConfig, EmbeddingConfigurationError, EmbeddingFormat, EmbeddingInputMode
 from rigel_demo.project.summaries import attach_retrieval_summaries, build_retrieval_summary
 from rigel_demo.llm import (
     DEFAULT_CHAT_SYSTEM_PROMPT,
@@ -615,6 +615,7 @@ def _demo_config_json() -> str:
                 **_demo_llm_config(DEFAULT_SUMMARY_SYSTEM_PROMPT),
                 "temperature": 0,
                 "max_output_tokens": 300,
+                "concurrent_requests": 4,
             },
             "embedding": {
                 "provider": "openai",
@@ -625,6 +626,7 @@ def _demo_config_json() -> str:
                 "dimensions": 3,
                 "timeout_seconds": 60,
                 "batch_size": 8,
+                "input_mode": "array",
             },
         },
         ensure_ascii=False,
@@ -678,6 +680,7 @@ class _FakeEmbeddingClient:
             dimensions=3,
             timeout_seconds=1,
             batch_size=8,
+            input_mode=EmbeddingInputMode.ARRAY,
         )
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:

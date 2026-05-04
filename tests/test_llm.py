@@ -71,6 +71,7 @@ class LLMConfigTest(TestCase):
                             "timeout_seconds": 60,
                             "temperature": 0,
                             "max_output_tokens": 256,
+                            "concurrent_requests": 6,
                             "system_prompt": DEFAULT_SUMMARY_SYSTEM_PROMPT,
                         },
                     },
@@ -86,7 +87,29 @@ class LLMConfigTest(TestCase):
         self.assertEqual(config.model, "gpt-5.2-mini")
         self.assertEqual(config.api_key, "summary-key")
         self.assertEqual(config.max_output_tokens, 256)
+        self.assertEqual(config.concurrent_requests, 6)
         self.assertIn("摘要生成器", config.system_prompt)
+
+    def test_summary_section_rejects_invalid_concurrent_requests(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = _write_llm_config(
+                Path(workspace),
+                {
+                    "provider": "openai",
+                    "model": "gpt-5.2-mini",
+                    "api_key": "summary-key",
+                    "base_url": None,
+                    "timeout_seconds": 60,
+                    "temperature": 0,
+                    "max_output_tokens": 256,
+                    "concurrent_requests": 0,
+                    "system_prompt": DEFAULT_SUMMARY_SYSTEM_PROMPT,
+                },
+                section=LLMConfigSection.SUMMARY,
+            )
+
+            with self.assertRaisesRegex(LLMConfigurationError, "summary.concurrent_requests"):
+                LLMConfig.from_repository(repository_path, LLMConfigSection.SUMMARY)
 
     def test_chat_completions_config_supports_custom_base_url(self) -> None:
         with TemporaryDirectory() as workspace:

@@ -40,6 +40,7 @@ DEFAULT_CONFIG_DOCUMENT = {
         "timeout_seconds": 60,
         "temperature": 0,
         "max_output_tokens": 300,
+        "concurrent_requests": 4,
         "system_prompt": DEFAULT_SUMMARY_SYSTEM_PROMPT,
     },
     "embedding": {
@@ -51,6 +52,7 @@ DEFAULT_CONFIG_DOCUMENT = {
         "dimensions": 512,
         "timeout_seconds": 60,
         "batch_size": 64,
+        "input_mode": "array",
     },
 }
 

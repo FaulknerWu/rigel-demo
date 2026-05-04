@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from rigel_demo.entities import Repository
 from rigel_demo.graph.ir import GraphEdge, GraphIR, NodeType
 from rigel_demo.embedding import EmbeddingConfig, RigelEmbedding
 from rigel_demo.project.summaries import (
+    SummaryProgress,
     SummaryEmbeddingClient,
     SummaryTextClient,
     attach_retrieval_summaries,
@@ -25,6 +28,27 @@ from rigel_demo.project.java_targets import (
     iter_java_targets,
 )
 from rigel_demo.llm import LLMConfig, LLMConfigSection, RigelLLM
+
+RepositoryIndexProgressStage = Literal[
+    "java_parse",
+    "semantic_edges",
+    "summary_text",
+    "summary_embedding",
+    "database_write",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryIndexProgress:
+    """仓库索引进度事件。"""
+
+    stage: RepositoryIndexProgressStage
+    current: int
+    total: int
+    detail: str
+
+
+RepositoryIndexProgressReporter = Callable[[RepositoryIndexProgress], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +90,7 @@ def index_repository(
     *,
     embedding_client: SummaryEmbeddingClient | RigelEmbedding | None = None,
     summary_client: SummaryTextClient | RigelLLM | None = None,
+    progress_reporter: RepositoryIndexProgressReporter | None = None,
 ) -> RepositoryIndexResult:
     """扫描仓库源码，并通过真实 Java LSP 补全跨文件语义边。"""
 
@@ -79,10 +104,18 @@ def index_repository(
     structure_result = _build_java_structure_graph(
         repository_name=resolved_repository_path.name,
         targets=iter_java_targets(resolved_repository_path),
+        progress_reporter=progress_reporter,
     )
 
     if structure_result.indexed_file_count > 0:
         # 语义边需要跨文件视角，必须等所有文件的结构实体都进入同一个 GraphIR 后再补全。
+        _report_progress(
+            progress_reporter,
+            stage="semantic_edges",
+            current=1,
+            total=1,
+            detail="全仓 Java 语义边",
+        )
         enrich_java_semantic_edges(
             structure_result.graph,
             request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
@@ -91,6 +124,7 @@ def index_repository(
         structure_result.graph,
         embedding_client=active_embedding_client,
         summary_client=active_summary_client,
+        progress_reporter=_summary_progress_reporter(progress_reporter),
     )
 
     return RepositoryIndexResult(
@@ -105,6 +139,7 @@ def index_repository_incremental(
     previous_file_hashes: dict[str, str],
     embedding_client: SummaryEmbeddingClient | RigelEmbedding | None = None,
     summary_client: SummaryTextClient | RigelLLM | None = None,
+    progress_reporter: RepositoryIndexProgressReporter | None = None,
 ) -> RepositoryIncrementalIndexResult:
     """构建新增和修改 Java 文件对应的可写入增量图谱。"""
 
@@ -133,8 +168,16 @@ def index_repository_incremental(
     full_graph = _build_java_structure_graph(
         repository_name=resolved_repository_path.name,
         targets=targets,
+        progress_reporter=progress_reporter,
     ).graph
     changed_file_paths = file_changes.changed_existing_file_paths
+    _report_progress(
+        progress_reporter,
+        stage="semantic_edges",
+        current=1,
+        total=1,
+        detail="变更 Java 文件语义边",
+    )
     enrich_java_semantic_edges(
         full_graph,
         request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
@@ -154,6 +197,7 @@ def index_repository_incremental(
         embedding_client=active_embedding_client,
         summary_client=active_summary_client,
         target_node_ids=summary_target_node_ids,
+        progress_reporter=_summary_progress_reporter(progress_reporter),
     )
     selected_node_ids.update(summary_node_ids_for_targets(full_graph, summary_target_node_ids))
 
@@ -178,16 +222,64 @@ def _build_java_structure_graph(
     *,
     repository_name: str,
     targets: list[JavaFileIndexTarget],
+    progress_reporter: RepositoryIndexProgressReporter | None = None,
 ) -> JavaStructureGraphResult:
     graph = _base_graph(repository_name)
+    total = len(targets)
 
     # 单文件解析会各自产生 Repository/Module 节点，合并时按 id 去重以保留解析器的自包含输出。
-    for target in targets:
+    for current, target in enumerate(targets, start=1):
+        _report_progress(
+            progress_reporter,
+            stage="java_parse",
+            current=current,
+            total=total,
+            detail=target.relative_path,
+        )
         request = _java_parse_request(repository_name, target)
         file_graph = parse_java_file(target.source_path.read_bytes(), target.relative_path, request=request)
         _merge_graph(graph, file_graph)
 
     return JavaStructureGraphResult(graph=graph, indexed_file_count=len(targets))
+
+
+def _summary_progress_reporter(
+    progress_reporter: RepositoryIndexProgressReporter | None,
+) -> Callable[[SummaryProgress], None] | None:
+    if progress_reporter is None:
+        return None
+
+    def report(progress: SummaryProgress) -> None:
+        progress_reporter(
+            RepositoryIndexProgress(
+                stage=progress.stage,
+                current=progress.current,
+                total=progress.total,
+                detail=progress.detail,
+            )
+        )
+
+    return report
+
+
+def _report_progress(
+    progress_reporter: RepositoryIndexProgressReporter | None,
+    *,
+    stage: RepositoryIndexProgressStage,
+    current: int,
+    total: int,
+    detail: str,
+) -> None:
+    if progress_reporter is None:
+        return
+    progress_reporter(
+        RepositoryIndexProgress(
+            stage=stage,
+            current=current,
+            total=total,
+            detail=detail,
+        )
+    )
 
 
 def _java_parse_request(repository_name: str, target: JavaFileIndexTarget) -> JavaParseRequest:

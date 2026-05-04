@@ -7,7 +7,12 @@ from typing import Any
 
 from openai import DefaultHttpxClient, OpenAI, OpenAIError
 
-from rigel_demo.embedding.config import EmbeddingConfig, EmbeddingConfigurationError, EmbeddingFormat
+from rigel_demo.embedding.config import (
+    EmbeddingConfig,
+    EmbeddingConfigurationError,
+    EmbeddingFormat,
+    EmbeddingInputMode,
+)
 
 
 class EmbeddingRequestError(RuntimeError):
@@ -65,6 +70,13 @@ class RigelEmbedding:
         if not normalized_texts:
             raise EmbeddingResponseError("Embedding 输入不能为空")
 
+        if self._config.input_mode == EmbeddingInputMode.STRING:
+            return [
+                embedding
+                for text in normalized_texts
+                for embedding in self._create_embedding_request(text, expected_count=1)
+            ]
+
         embeddings: list[list[float]] = []
         for start_index in range(0, len(normalized_texts), self._config.batch_size):
             batch = normalized_texts[start_index : start_index + self._config.batch_size]
@@ -72,9 +84,12 @@ class RigelEmbedding:
         return embeddings
 
     def _create_embedding_batch(self, texts: Sequence[str]) -> list[list[float]]:
+        return self._create_embedding_request(list(texts), expected_count=len(texts))
+
+    def _create_embedding_request(self, input_value: str | list[str], *, expected_count: int) -> list[list[float]]:
         request_body: dict[str, object] = {
             "model": self._config.model,
-            "input": list(texts),
+            "input": input_value,
             "encoding_format": "float",
         }
         if self._config.dimensions is not None:
@@ -86,12 +101,12 @@ class RigelEmbedding:
             raise EmbeddingRequestError(f"Embedding 调用失败：{error}") from error
 
         response_data = list(response.data)
-        if len(response_data) != len(texts):
+        if len(response_data) != expected_count:
             raise EmbeddingResponseError("Embedding 返回数量与输入数量不一致")
 
         response_data.sort(key=lambda item: _embedding_item_index(item))
         returned_indexes = [_embedding_item_index(item) for item in response_data]
-        if returned_indexes != list(range(len(texts))):
+        if returned_indexes != list(range(expected_count)):
             raise EmbeddingResponseError("Embedding 返回索引与输入顺序不匹配")
 
         embeddings: list[list[float]] = []

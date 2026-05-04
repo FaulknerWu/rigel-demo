@@ -19,6 +19,13 @@ class EmbeddingFormat(StrEnum):
     OPENAI_EMBEDDINGS = "openai_embeddings"
 
 
+class EmbeddingInputMode(StrEnum):
+    """OpenAI 兼容 Embedding 接口的 input 字段形态。"""
+
+    ARRAY = "array"
+    STRING = "string"
+
+
 class EmbeddingConfigurationError(ValueError):
     """Embedding 配置不可用。"""
 
@@ -35,6 +42,7 @@ class EmbeddingConfig:
     dimensions: int | None
     timeout_seconds: float
     batch_size: int
+    input_mode: EmbeddingInputMode
 
     @classmethod
     def from_repository(cls, repository_path: Path) -> "EmbeddingConfig":
@@ -54,6 +62,7 @@ class EmbeddingConfig:
         dimensions = reader.nullable_positive_int("dimensions")
         timeout_seconds = reader.positive_float("timeout_seconds")
         batch_size = _read_batch_size(reader)
+        input_mode = _read_input_mode(reader)
 
         return cls(
             provider=provider,
@@ -64,6 +73,7 @@ class EmbeddingConfig:
             dimensions=dimensions,
             timeout_seconds=timeout_seconds,
             batch_size=batch_size,
+            input_mode=input_mode,
         )
 
 
@@ -107,3 +117,14 @@ def _read_batch_size(reader: ConfigFieldReader) -> int:
     if value > MAX_EMBEDDING_BATCH_SIZE:
         raise EmbeddingConfigurationError(f"embedding.batch_size 不能大于 {MAX_EMBEDDING_BATCH_SIZE}")
     return value
+
+
+def _read_input_mode(reader: ConfigFieldReader) -> EmbeddingInputMode:
+    if "input_mode" not in reader.data:
+        return EmbeddingInputMode.ARRAY
+    value = reader.required_string("input_mode").lower()
+    try:
+        return EmbeddingInputMode(value)
+    except ValueError as error:
+        supported_values = ", ".join(input_mode.value for input_mode in EmbeddingInputMode)
+        raise EmbeddingConfigurationError(f"embedding.input_mode 仅支持：{supported_values}") from error

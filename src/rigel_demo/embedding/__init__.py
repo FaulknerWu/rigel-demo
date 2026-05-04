@@ -7,12 +7,14 @@ from rigel_demo.embedding.config import (
     EmbeddingConfig,
     EmbeddingConfigurationError,
     EmbeddingFormat,
+    EmbeddingInputMode,
 )
 
 __all__ = [
     "EmbeddingConfig",
     "EmbeddingConfigurationError",
     "EmbeddingFormat",
+    "EmbeddingInputMode",
     "EmbeddingRequestError",
     "EmbeddingResponseError",
     "RigelEmbedding",

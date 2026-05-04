@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
-from typing import Protocol, cast
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Literal, Protocol, cast
 
 from rigel_demo.entities import Summary
 from rigel_demo.graph.ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType
@@ -17,6 +19,20 @@ SUMMARY_DESCRIBES_KIND = "retrieval-summary"
 SUMMARY_SOURCE_HASH_PREFIX = "sha256:"
 
 _SUMMARY_TARGET_TYPES = {NodeType.MODULE, NodeType.FILE, NodeType.ENTITY}
+SummaryProgressStage = Literal["summary_text", "summary_embedding"]
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryProgress:
+    """检索摘要构建的进度事件。"""
+
+    stage: SummaryProgressStage
+    current: int
+    total: int
+    detail: str
+
+
+SummaryProgressReporter = Callable[[SummaryProgress], None]
 
 
 class SummaryClientConfig(Protocol):
@@ -49,6 +65,7 @@ def attach_retrieval_summaries(
     embedding_client: SummaryEmbeddingClient | RigelEmbedding,
     summary_client: SummaryTextClient | RigelLLM,
     target_node_ids: set[str] | None = None,
+    progress_reporter: SummaryProgressReporter | None = None,
 ) -> GraphIR:
     """为可召回节点追加 Summary 节点和 DESCRIBES 边。"""
 
@@ -76,11 +93,16 @@ def attach_retrieval_summaries(
     # 先生成全部摘要文本再批量 Embedding，减少外部模型调用次数并保持结果顺序可校验。
     if not target_nodes:
         return graph
-    summary_texts = [
-        _generate_summary_text(target_node, summary_client=summary_client)
-        for target_node in target_nodes
-    ]
-    embeddings = embedding_client.embed_texts(summary_texts)
+    summary_texts = _generate_summary_texts(
+        target_nodes,
+        summary_client=summary_client,
+        progress_reporter=progress_reporter,
+    )
+    embeddings = _generate_summary_embeddings(
+        summary_texts,
+        embedding_client=embedding_client,
+        progress_reporter=progress_reporter,
+    )
     if len(embeddings) != len(target_nodes):
         raise ValueError("Embedding 返回数量与 Summary 目标数量不一致")
 
@@ -242,6 +264,37 @@ def _summary_id(target_node: GraphNode) -> str:
     return f"summary:{target_node.id}:retrieval"
 
 
+def _generate_summary_texts(
+    target_nodes: list[GraphNode],
+    *,
+    summary_client: SummaryTextClient | RigelLLM,
+    progress_reporter: SummaryProgressReporter | None,
+) -> list[str]:
+    summary_texts = [""] * len(target_nodes)
+    total = len(target_nodes)
+    completed_count = 0
+    max_workers = _summary_concurrent_requests(summary_client.config, total)
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="rigel-summary") as executor:
+        future_indexes = {
+            executor.submit(_generate_summary_text, target_node, summary_client=summary_client): index
+            for index, target_node in enumerate(target_nodes)
+        }
+        for future in as_completed(future_indexes):
+            index = future_indexes[future]
+            summary_texts[index] = future.result()
+            completed_count += 1
+            if progress_reporter is not None:
+                progress_reporter(
+                    SummaryProgress(
+                        stage="summary_text",
+                        current=completed_count,
+                        total=total,
+                        detail=_summary_progress_detail(target_nodes[index]),
+                    )
+                )
+    return summary_texts
+
+
 def _generate_summary_text(target_node: GraphNode, *, summary_client: SummaryTextClient | RigelLLM) -> str:
     summary_text = _normalize_summary_text(
         summary_client.generate_reply([LLMMessage(role="user", content=_summary_prompt(target_node))])
@@ -249,6 +302,60 @@ def _generate_summary_text(target_node: GraphNode, *, summary_client: SummaryTex
     if not summary_text:
         raise ValueError("Summary 模型返回空摘要")
     return summary_text
+
+
+def _generate_summary_embeddings(
+    summary_texts: list[str],
+    *,
+    embedding_client: SummaryEmbeddingClient | RigelEmbedding,
+    progress_reporter: SummaryProgressReporter | None,
+) -> list[list[float]]:
+    embeddings: list[list[float]] = []
+    total = len(summary_texts)
+    batch_size = _embedding_batch_size(embedding_client.config, total)
+    for start_index in range(0, total, batch_size):
+        end_index = min(start_index + batch_size, total)
+        if progress_reporter is not None:
+            progress_reporter(
+                SummaryProgress(
+                    stage="summary_embedding",
+                    current=start_index + 1,
+                    total=total,
+                    detail=f"{start_index + 1}-{end_index}",
+                )
+            )
+        batch_embeddings = embedding_client.embed_texts(summary_texts[start_index:end_index])
+        if len(batch_embeddings) != end_index - start_index:
+            raise ValueError("Embedding 返回数量与 Summary 批次数量不一致")
+        embeddings.extend(batch_embeddings)
+    return embeddings
+
+
+def _embedding_batch_size(config: SummaryClientConfig, total: int) -> int:
+    if getattr(config, "input_mode", None) == "string":
+        return 1
+    batch_size = getattr(config, "batch_size", total)
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+        return total
+    return batch_size
+
+
+def _summary_concurrent_requests(config: SummaryClientConfig, total: int) -> int:
+    concurrent_requests = getattr(config, "concurrent_requests", 1)
+    if isinstance(concurrent_requests, bool) or not isinstance(concurrent_requests, int) or concurrent_requests <= 0:
+        return 1
+    return min(concurrent_requests, total)
+
+
+def _summary_progress_detail(target_node: GraphNode) -> str:
+    properties = target_node.properties
+    if target_node.type == NodeType.FILE:
+        return str(properties.get("relative_path", target_node.id))
+    if target_node.type == NodeType.ENTITY:
+        return str(properties.get("qualified_name") or properties.get("display_name") or target_node.id)
+    if target_node.type == NodeType.MODULE:
+        return str(properties.get("name", target_node.id))
+    return target_node.id
 
 
 def _summary_prompt(target_node: GraphNode) -> str:

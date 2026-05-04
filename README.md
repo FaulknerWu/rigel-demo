@@ -105,7 +105,8 @@ uv run --project /home/user/workspace/rigel-demo rigel init
     "provider": "openai",
     "model": "gpt-5.2",
     "api_key": "sk-your-openai-key",
-    "base_url": null
+    "base_url": null,
+    "concurrent_requests": 4
   },
   "embedding": {
     "provider": "openai",
@@ -113,12 +114,15 @@ uv run --project /home/user/workspace/rigel-demo rigel init
     "model": "text-embedding-3-small",
     "api_key": "sk-your-openai-key",
     "base_url": null,
-    "dimensions": 512
+    "dimensions": 512,
+    "batch_size": 64,
+    "input_mode": "array"
   }
 }
 ```
 
 如果使用兼容 OpenAI 协议的第三方服务，需要同时配置对应段落的 `base_url`。
+如果 Embedding 服务只接受单条字符串输入，将 `embedding.input_mode` 改成 `"string"`；标准 OpenAI 兼容批量接口使用 `"array"`。
 
 ### 5. 构建索引
 
@@ -180,4 +184,4 @@ uv run --project /home/wu/workspace/rigel-demo rigel web
 - `summary`：索引阶段生成 Summary 文本的模型配置。
 - `embedding`：摘要向量和查询向量使用的 Embedding 模型配置。
 
-`chat` 与 `summary` 会读取各自的 `system_prompt`、`temperature`、`max_output_tokens` 等生成参数。`embedding.format` 当前支持 `openai_embeddings`。
+`chat` 与 `summary` 会读取各自的 `system_prompt`、`temperature`、`max_output_tokens` 等生成参数。`summary.concurrent_requests` 控制索引阶段并发生成 Summary 文本的请求数。`embedding.format` 当前支持 `openai_embeddings`，`embedding.input_mode` 支持 `array` 和 `string`。

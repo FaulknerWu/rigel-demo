@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -126,6 +127,37 @@ class CliIndexTest(TestCase):
         self.assertEqual(state["last_index_mode"], "incremental")
         self.assertEqual(state["last_incremental_result"]["added_files"], ["src/main/java/demo/Added.java"])
         self.assertEqual(state["last_incremental_result"]["skipped_file_count"], 1)
+
+    def test_index_command_prints_file_progress(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            config_path = repository_path / ".rigel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(json.dumps(DEFAULT_CONFIG_DOCUMENT, ensure_ascii=False) + "\n", encoding="utf-8")
+            stdout = StringIO()
+
+            def fake_index_repository(_repository_path: Path, *, progress_reporter, **_kwargs: object) -> SimpleNamespace:
+                progress_reporter(
+                    SimpleNamespace(
+                        stage="java_parse",
+                        current=1,
+                        total=2,
+                        detail="src/main/java/demo/App.java",
+                    )
+                )
+                return SimpleNamespace(graph=_demo_graph(), indexed_file_count=1)
+
+            with (
+                patch("rigel_demo.cli.Path.cwd", return_value=repository_path),
+                patch("rigel_demo.project.repository_indexer.index_repository", side_effect=fake_index_repository),
+                patch("sys.stdout", stdout),
+            ):
+                exit_code = main(["index"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Rigel 开始索引", stdout.getvalue())
+        self.assertIn("解析 Java 文件 [1/2]: src/main/java/demo/App.java", stdout.getvalue())
+        self.assertIn("写入图数据库 [1/1]: 写入完整图谱", stdout.getvalue())
 
 
 class CliWebConfigTest(TestCase):

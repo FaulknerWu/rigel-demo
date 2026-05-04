@@ -258,6 +258,7 @@ def _embedding_status(embedding_client: RigelEmbedding) -> dict[str, object]:
         "base_url": config.base_url,
         "dimensions": config.dimensions,
         "batch_size": config.batch_size,
+        "input_mode": config.input_mode.value,
     }
 
 

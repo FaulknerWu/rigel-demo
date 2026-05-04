@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import webbrowser
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from rigel_demo.cli_config import DEFAULT_CONFIG_DOCUMENT, WebConfig, WebConfigu
 from rigel_demo.cli_frontend import FrontendBuildResult, build_frontend
 
 if TYPE_CHECKING:
+    from rigel_demo.project.repository_indexer import RepositoryIndexProgress, RepositoryIndexProgressStage
     from rigel_demo.storage.falkordb.store import FalkorDBStore
 
 
@@ -27,6 +29,13 @@ WORKSPACE_STATE_FILE_NAME = "rigel.json"
 WEB_STATIC_DIRECTORY_NAME = "web/static"
 DEFAULT_GRAPH_NAME = "rigel"
 IndexMode = Literal["full", "incremental"]
+INDEX_PROGRESS_STAGE_LABELS = {
+    "java_parse": "解析 Java 文件",
+    "semantic_edges": "补全 Java 语义边",
+    "summary_text": "生成检索摘要",
+    "summary_embedding": "生成摘要向量",
+    "database_write": "写入图数据库",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +116,12 @@ def init_repository(repository_path: Path | None = None) -> InitResult:
     )
 
 
-def index_repository_workspace(repository_path: Path | None = None, *, incremental: bool = False) -> IndexResult:
+def index_repository_workspace(
+    repository_path: Path | None = None,
+    *,
+    incremental: bool = False,
+    progress_reporter: Callable[["RepositoryIndexProgress"], None] | None = None,
+) -> IndexResult:
     """扫描目标仓库并重建 Rigel 本地图数据库。"""
 
     workspace_paths = WorkspacePaths.from_repository(repository_path)
@@ -116,9 +130,17 @@ def index_repository_workspace(repository_path: Path | None = None, *, increment
     started_at = perf_counter()
 
     if incremental:
-        result = _index_workspace_incrementally(workspace_paths, started_at=started_at)
+        result = _index_workspace_incrementally(
+            workspace_paths,
+            started_at=started_at,
+            progress_reporter=progress_reporter,
+        )
     else:
-        result = _index_workspace_fully(workspace_paths, started_at=started_at)
+        result = _index_workspace_fully(
+            workspace_paths,
+            started_at=started_at,
+            progress_reporter=progress_reporter,
+        )
     _write_workspace_state(workspace_paths.state_path, result)
     return result
 
@@ -190,11 +212,24 @@ def _connect_workspace_store(workspace_paths: WorkspacePaths) -> "FalkorDBStore"
     )
 
 
-def _index_workspace_fully(workspace_paths: WorkspacePaths, *, started_at: float) -> IndexResult:
+def _index_workspace_fully(
+    workspace_paths: WorkspacePaths,
+    *,
+    started_at: float,
+    progress_reporter: Callable[["RepositoryIndexProgress"], None] | None,
+) -> IndexResult:
     from rigel_demo.project.repository_indexer import index_repository
 
     _remove_database_artifacts(workspace_paths.database_path)
-    index_result = index_repository(workspace_paths.repository_path)
+    index_result = index_repository(
+        workspace_paths.repository_path,
+        progress_reporter=progress_reporter,
+    )
+    _report_index_progress(
+        progress_reporter,
+        stage="database_write",
+        detail="写入完整图谱",
+    )
     _connect_workspace_store(workspace_paths).upsert_graph(index_result.graph)
 
     return _index_result(
@@ -207,7 +242,12 @@ def _index_workspace_fully(workspace_paths: WorkspacePaths, *, started_at: float
     )
 
 
-def _index_workspace_incrementally(workspace_paths: WorkspacePaths, *, started_at: float) -> IndexResult:
+def _index_workspace_incrementally(
+    workspace_paths: WorkspacePaths,
+    *,
+    started_at: float,
+    progress_reporter: Callable[["RepositoryIndexProgress"], None] | None,
+) -> IndexResult:
     from rigel_demo.project.repository_indexer import index_repository_incremental
 
     if not database_artifact_exists(workspace_paths.database_path):
@@ -218,6 +258,12 @@ def _index_workspace_incrementally(workspace_paths: WorkspacePaths, *, started_a
     index_result = index_repository_incremental(
         workspace_paths.repository_path,
         previous_file_hashes=store.list_java_file_hashes(),
+        progress_reporter=progress_reporter,
+    )
+    _report_index_progress(
+        progress_reporter,
+        stage="database_write",
+        detail="删除旧子图并写入变更图谱",
     )
     deleted_node_count = store.delete_file_subgraphs(
         [*index_result.modified_files, *index_result.deleted_files]
@@ -277,8 +323,15 @@ def _index_result(
 def _handle_index_command(_args: argparse.Namespace) -> int:
     """处理 index 命令。"""
 
+    workspace_paths = WorkspacePaths.from_repository()
     try:
-        result = index_repository_workspace(incremental=_args.incremental)
+        _ensure_workspace_config_exists(workspace_paths)
+        print("Rigel 开始索引", flush=True)
+        result = index_repository_workspace(
+            workspace_paths.repository_path,
+            incremental=_args.incremental,
+            progress_reporter=_print_repository_index_progress,
+        )
     except FileNotFoundError as error:
         print(str(error))
         return 1
@@ -306,6 +359,33 @@ def _handle_index_command(_args: argparse.Namespace) -> int:
             for relative_path in files:
                 print(f"{label}: {relative_path}")
     return 0
+
+
+def _print_repository_index_progress(progress: "RepositoryIndexProgress") -> None:
+    """打印索引进度，方便长耗时仓库观察当前处理位置。"""
+
+    stage_label = INDEX_PROGRESS_STAGE_LABELS[progress.stage]
+    print(f"{stage_label} [{progress.current}/{progress.total}]: {progress.detail}", flush=True)
+
+
+def _report_index_progress(
+    progress_reporter: Callable[["RepositoryIndexProgress"], None] | None,
+    *,
+    stage: "RepositoryIndexProgressStage",
+    detail: str,
+) -> None:
+    if progress_reporter is None:
+        return
+    from rigel_demo.project.repository_indexer import RepositoryIndexProgress
+
+    progress_reporter(
+        RepositoryIndexProgress(
+            stage=stage,
+            current=1,
+            total=1,
+            detail=detail,
+        )
+    )
 
 
 def _handle_web_command(_args: argparse.Namespace) -> int:
