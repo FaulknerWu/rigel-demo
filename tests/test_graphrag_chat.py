@@ -1,100 +1,184 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import patch
 
 from falkordb import FalkorDB
 
+from rigel_demo.config import GraphRAGConfig
 from rigel_demo.graphrag.chat import (
-    GraphRAGSDKChatService,
-    _apply_litellm_environment,
-    _litellm_additional_params,
-    _litellm_model_name,
-    _restore_litellm_environment,
+    LangGraphChatService,
+    RigelGraphRAGError,
+    _apply_safe_limit,
+    _is_safe_readonly_cypher,
+    _sanitize_generated_cypher,
     _start_embedded_falkordb_runtime,
 )
-from rigel_demo.config import GraphRAGConfig
 from rigel_demo.llm import LLMConfig, LLMMessage
 
 
-class GraphRAGSDKChatServiceTest(TestCase):
-    def test_send_messages_uses_knowledge_graph_chat_session(self) -> None:
-        fake_chat_session = _FakeChatSession()
-        config = _llm_config()
+class LangGraphChatServiceTest(TestCase):
+    def test_send_messages_generates_cypher_executes_query_and_answers(self) -> None:
+        fake_model = _FakeChatModel(["MATCH (entity:Entity) RETURN entity", "PaymentService 处理支付流程"])
+        fake_graph = _FakeGraph()
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            chat_model=fake_model,
+            graph=fake_graph,
+        )
 
-        with patch("rigel_demo.graphrag.chat._build_chat_session", return_value=fake_chat_session):
-            chat = GraphRAGSDKChatService(
-                config=config,
-                graphrag_config=GraphRAGConfig(
-                    host="127.0.0.1",
-                    port=6379,
-                    username=None,
-                    password=None,
-                ),
-                graph_name="rigel",
+        reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 做什么")])
+
+        self.assertEqual(reply.content, "PaymentService 处理支付流程")
+        self.assertEqual(fake_graph.queries, ["MATCH (entity:Entity) RETURN entity LIMIT 20"])
+        self.assertEqual([trace.name for trace in reply.traces], ["cypher", "context"])
+        self.assertEqual(reply.traces[0].args["query"], "MATCH (entity:Entity) RETURN entity LIMIT 20")
+        self.assertEqual(reply.traces[1].args["items"], 1)
+
+    def test_send_messages_passes_recent_assistant_answer_to_followup_prompt(self) -> None:
+        fake_model = _FakeChatModel(["MATCH (entity:Entity) RETURN entity LIMIT 5", "它依赖 Repository"])
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            chat_model=fake_model,
+            graph=_FakeGraph(),
+        )
+
+        chat.send_messages(
+            [
+                LLMMessage(role="user", content="PaymentService 做什么"),
+                LLMMessage(role="assistant", content="它处理付款"),
+                LLMMessage(role="user", content="它依赖什么"),
+            ]
+        )
+
+        cypher_prompt = fake_model.calls[0][1][1]
+        self.assertIn("上一轮回答：它处理付款", cypher_prompt)
+        self.assertIn("用户追问：它依赖什么", cypher_prompt)
+
+    def test_send_messages_rejects_empty_messages(self) -> None:
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            chat_model=_FakeChatModel([]),
+            graph=_FakeGraph(),
+        )
+
+        with self.assertRaisesRegex(RigelGraphRAGError, "消息列表不能为空"):
+            chat.send_messages([])
+
+    def test_send_messages_rejects_last_non_user_message(self) -> None:
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            chat_model=_FakeChatModel([]),
+            graph=_FakeGraph(),
+        )
+
+        with self.assertRaisesRegex(RigelGraphRAGError, "最后一条消息必须来自用户"):
+            chat.send_messages([LLMMessage(role="assistant", content="回复")])
+
+    def test_unsafe_cypher_is_rejected_without_query_execution(self) -> None:
+        fake_graph = _FakeGraph()
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            chat_model=_FakeChatModel(["MATCH (n) DELETE n", "不应调用"]),
+            graph=fake_graph,
+        )
+
+        reply = chat.send_messages([LLMMessage(role="user", content="删除所有节点")])
+
+        self.assertEqual(reply.content, "无法生成安全只读查询，因此没有执行图数据库查询。")
+        self.assertEqual(fake_graph.queries, [])
+        self.assertEqual(reply.traces[0].args["rejected"], True)
+
+    def test_regex_match_is_rewritten_to_falkordb_contains(self) -> None:
+        fake_model = _FakeChatModel(
+            [
+                "MATCH (entity:Entity) WHERE entity.display_name =~ '(?i).*PaymentService.*' RETURN entity",
+                "PaymentService 处理支付流程",
+            ]
+        )
+        fake_graph = _FakeGraph()
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            chat_model=fake_model,
+            graph=fake_graph,
+        )
+
+        reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 做什么")])
+
+        self.assertEqual(reply.content, "PaymentService 处理支付流程")
+        self.assertEqual(
+            fake_graph.queries,
+            [
+                "MATCH (entity:Entity) WHERE toLower(coalesce(entity.display_name, '')) "
+                "CONTAINS 'paymentservice' RETURN entity LIMIT 20"
+            ],
+        )
+
+    def test_complex_regex_match_is_rejected_without_query_execution(self) -> None:
+        fake_model = _FakeChatModel(["MATCH (entity:Entity) WHERE entity.display_name =~ 'Pay.*Service|Order' RETURN entity"])
+        fake_graph = _FakeGraph()
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            chat_model=fake_model,
+            graph=fake_graph,
+        )
+
+        reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 做什么")])
+
+        self.assertEqual(reply.content, "无法生成安全只读查询，因此没有执行图数据库查询。")
+        self.assertEqual(fake_graph.queries, [])
+        self.assertEqual(reply.traces[0].args["rejected"], True)
+
+    def test_query_execution_failure_degrades_to_empty_context_answer(self) -> None:
+        fake_model = _FakeChatModel(["MATCH (entity:Entity) RETURN entity", "无法从当前图谱确认"])
+        fake_graph = _FakeGraph(error=RuntimeError("Generated Cypher Statement is not valid"))
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            chat_model=fake_model,
+            graph=fake_graph,
+        )
+
+        reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 做什么")])
+
+        self.assertEqual(reply.content, "无法从当前图谱确认")
+        self.assertEqual(reply.traces[1].args["items"], 0)
+        self.assertIn("图查询执行失败", str(reply.traces[0].args["error"]))
+
+    def test_safe_cypher_validation_and_limit(self) -> None:
+        self.assertTrue(_is_safe_readonly_cypher("MATCH (n) RETURN n"))
+        self.assertTrue(
+            _is_safe_readonly_cypher(
+                "MATCH (n) WHERE toLower(coalesce(n.name, '')) CONTAINS 'payment' RETURN n"
             )
-            reply = chat.send_messages(
-                [
-                    LLMMessage(role="user", content="PaymentService 做什么"),
-                    LLMMessage(role="assistant", content="它处理支付"),
-                    LLMMessage(role="user", content="它依赖什么"),
-                ]
-            )
-
-        self.assertEqual(fake_chat_session.messages, ["PaymentService 做什么", "它依赖什么"])
-        self.assertEqual(reply.content, "GraphRAG 回复")
-        self.assertEqual(reply.traces[0].name, "cypher")
-        self.assertEqual(reply.traces[0].args["query"], "MATCH (entity:Entity) RETURN entity")
-
-    def test_litellm_model_name_adds_provider_prefix(self) -> None:
-        self.assertEqual(_litellm_model_name(_llm_config(model="gpt-5.2")), "openai/gpt-5.2")
-        self.assertEqual(_litellm_model_name(_llm_config(model="openai/gpt-5.2")), "openai/gpt-5.2")
-
-    def test_litellm_environment_uses_chat_config_api_key(self) -> None:
-        config = _llm_config(api_key="config-key", base_url="https://api.example.test/v1")
-        original_api_key = os.environ.pop("OPENAI_API_KEY", None)
-        original_api_base = os.environ.pop("OPENAI_API_BASE", None)
-        try:
-            snapshot = _apply_litellm_environment(config)
-            self.assertEqual(os.environ["OPENAI_API_KEY"], "config-key")
-            self.assertEqual(os.environ["OPENAI_API_BASE"], "https://api.example.test/v1")
-            self.assertEqual(_litellm_additional_params(config), {"api_base": "https://api.example.test/v1"})
-            _restore_litellm_environment(snapshot)
-            self.assertNotIn("OPENAI_API_KEY", os.environ)
-            self.assertNotIn("OPENAI_API_BASE", os.environ)
-        finally:
-            if original_api_key is not None:
-                os.environ["OPENAI_API_KEY"] = original_api_key
-            if original_api_base is not None:
-                os.environ["OPENAI_API_BASE"] = original_api_base
-
-    def test_send_messages_accepts_object_response_text(self) -> None:
-        fake_chat_session = _FakeChatSession(response=SimpleNamespace(answer="对象回复"))
-
-        with patch("rigel_demo.graphrag.chat._build_chat_session", return_value=fake_chat_session):
-            chat = GraphRAGSDKChatService(
-                config=_llm_config(),
-                graphrag_config=GraphRAGConfig(
-                    host="127.0.0.1",
-                    port=6379,
-                    username=None,
-                    password=None,
-                ),
-                graph_name="rigel",
-            )
-            reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 做什么")])
-
-        self.assertEqual(reply.content, "对象回复")
-        self.assertEqual(reply.traces, [])
-
-    def test_config_missing_file_keeps_file_not_found_error(self) -> None:
-        with TemporaryDirectory() as workspace:
-            with self.assertRaisesRegex(FileNotFoundError, "rigel init"):
-                GraphRAGConfig.from_repository(Path(workspace))
+        )
+        self.assertFalse(_is_safe_readonly_cypher("CREATE (:Entity)"))
+        self.assertFalse(_is_safe_readonly_cypher("MATCH (n) RETURN n; MATCH (m) RETURN m"))
+        self.assertFalse(_is_safe_readonly_cypher("CALL db.labels()"))
+        self.assertFalse(_is_safe_readonly_cypher("MATCH (n) WHERE n.name =~ '.*Payment.*' RETURN n"))
+        self.assertEqual(_apply_safe_limit("MATCH (n) RETURN n"), "MATCH (n) RETURN n LIMIT 20")
+        self.assertEqual(_apply_safe_limit("MATCH (n) RETURN n LIMIT 3"), "MATCH (n) RETURN n LIMIT 3")
+        self.assertEqual(
+            _sanitize_generated_cypher("MATCH (n) WHERE n.name =~ '(?i).*Payment.*' RETURN n"),
+            "MATCH (n) WHERE toLower(coalesce(n.name, '')) CONTAINS 'payment' RETURN n",
+        )
 
     def test_embedded_falkordblite_runtime_exposes_repository_database_over_tcp(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -114,33 +198,44 @@ class GraphRAGSDKChatServiceTest(TestCase):
         self.assertEqual(rows, [["repo:demo"]])
 
 
-class _FakeChatSession:
-    def __init__(self, response: object | None = None) -> None:
-        self.messages: list[str] = []
-        self.response = response
+class _FakeChatModel:
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = responses
+        self.calls: list[list[tuple[str, str]]] = []
 
-    def send_message(self, message: str) -> object:
-        self.messages.append(message)
-        if self.response is not None:
-            return self.response
-        return {
-            "response": "GraphRAG 回复",
-            "cypher": "MATCH (entity:Entity) RETURN entity",
-            "context": [{"id": "entity:demo:PaymentService"}],
-        }
+    def invoke(self, messages: list[tuple[str, str]]) -> SimpleNamespace:
+        self.calls.append(messages)
+        return SimpleNamespace(content=self._responses.pop(0))
 
 
-def _llm_config(
-    *,
-    model: str = "gpt-5.2",
-    api_key: str = "fake-key",
-    base_url: str | None = None,
-) -> LLMConfig:
+class _FakeGraph:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.get_schema = "(:Entity {id: STRING})"
+        self.queries: list[str] = []
+        self.error = error
+
+    def query(self, cypher: str) -> list[dict[str, object]]:
+        self.queries.append(cypher)
+        if self.error is not None:
+            raise self.error
+        return [{"entity": {"id": "entity:demo:PaymentService", "display_name": "PaymentService"}}]
+
+
+def _llm_config() -> LLMConfig:
     return LLMConfig(
         provider="openai",
-        model=model,
-        api_key=api_key,
-        base_url=base_url,
+        model="gpt-5.2",
+        api_key="fake-key",
+        base_url=None,
         timeout_seconds=1,
         system_prompt="系统提示",
+    )
+
+
+def _graphrag_config() -> GraphRAGConfig:
+    return GraphRAGConfig(
+        host="127.0.0.1",
+        port=6379,
+        username=None,
+        password=None,
     )

@@ -12,7 +12,7 @@ from typing import Literal, Protocol, cast
 from rigel_demo.entities import Summary
 from rigel_demo.graph.ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType
 from rigel_demo.embedding import RigelEmbedding
-from rigel_demo.llm import LLMMessage, RigelLLM
+from rigel_demo.llm import LLMMessage
 
 RETRIEVAL_SUMMARY_PURPOSE = "retrieval"
 SUMMARY_DESCRIBES_KIND = "retrieval-summary"
@@ -63,7 +63,7 @@ def attach_retrieval_summaries(
     graph: GraphIR,
     *,
     embedding_client: SummaryEmbeddingClient | RigelEmbedding,
-    summary_client: SummaryTextClient | RigelLLM,
+    summary_client: SummaryTextClient,
     target_node_ids: set[str] | None = None,
     progress_reporter: SummaryProgressReporter | None = None,
 ) -> GraphIR:
@@ -267,7 +267,7 @@ def _summary_id(target_node: GraphNode) -> str:
 def _generate_summary_texts(
     target_nodes: list[GraphNode],
     *,
-    summary_client: SummaryTextClient | RigelLLM,
+    summary_client: SummaryTextClient,
     progress_reporter: SummaryProgressReporter | None,
 ) -> list[str]:
     summary_texts = [""] * len(target_nodes)
@@ -295,7 +295,7 @@ def _generate_summary_texts(
     return summary_texts
 
 
-def _generate_summary_text(target_node: GraphNode, *, summary_client: SummaryTextClient | RigelLLM) -> str:
+def _generate_summary_text(target_node: GraphNode, *, summary_client: SummaryTextClient) -> str:
     summary_text = _normalize_summary_text(
         summary_client.generate_reply([LLMMessage(role="user", content=_summary_prompt(target_node))])
     )

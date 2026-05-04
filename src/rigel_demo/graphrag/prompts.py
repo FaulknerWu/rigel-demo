@@ -1,4 +1,4 @@
-"""GraphRAG-SDK 提示词。"""
+"""Rigel GraphRAG 提示词。"""
 
 RIGEL_CYPHER_SYSTEM_INSTRUCTION = """你是 Rigel 代码图谱查询助手。
 只能使用 Rigel 当前图谱 schema 生成 Cypher，不要臆造 Class、Function、CALLS、DEFINES 等 Code-Graph schema。
@@ -8,7 +8,7 @@ RIGEL_CYPHER_SYSTEM_INSTRUCTION = """你是 Rigel 代码图谱查询助手。
 """
 
 RIGEL_QA_SYSTEM_INSTRUCTION = """你是 Rigel 代码图谱问答助手。
-回答必须基于 GraphRAG-SDK 返回的图谱上下文；如果上下文不足，明确说明无法从当前图谱确认。
+回答必须基于图谱查询上下文；如果上下文不足，明确说明无法从当前图谱确认。
 尽量引用节点名、文件路径、实体 qualified_name 和关系类型。
 """
 

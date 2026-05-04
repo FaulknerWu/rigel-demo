@@ -33,24 +33,12 @@ class RigelEmbedding:
         openai_client: Any | None = None,
     ) -> None:
         self._config = config
-        if openai_client is not None:
-            self._client = openai_client
-            return
+        if openai_client is None:
+            raise EmbeddingConfigurationError("RigelEmbedding 必须显式传入 openai_client")
         if config.format is not EmbeddingFormat.OPENAI_EMBEDDINGS:
             raise EmbeddingConfigurationError(f"不支持的 Embedding 请求格式：{config.format.value}")
 
-        client_options: dict[str, Any] = {
-            "api_key": config.api_key,
-            "timeout": config.timeout_seconds,
-            "http_client": DefaultHttpxClient(trust_env=False),
-        }
-        if config.base_url:
-            client_options["base_url"] = config.base_url
-
-        try:
-            self._client = OpenAI(**client_options)
-        except Exception as error:
-            raise EmbeddingConfigurationError(f"Embedding 客户端初始化失败：{error}") from error
+        self._client = openai_client
 
     @property
     def config(self) -> EmbeddingConfig:
@@ -104,11 +92,6 @@ class RigelEmbedding:
         if len(response_data) != expected_count:
             raise EmbeddingResponseError("Embedding 返回数量与输入数量不一致")
 
-        response_data.sort(key=lambda item: _embedding_item_index(item))
-        returned_indexes = [_embedding_item_index(item) for item in response_data]
-        if returned_indexes != list(range(expected_count)):
-            raise EmbeddingResponseError("Embedding 返回索引与输入顺序不匹配")
-
         embeddings: list[list[float]] = []
         for item in response_data:
             raw_embedding = item.embedding
@@ -131,13 +114,6 @@ def _normalize_texts(texts: Sequence[str]) -> list[str]:
     return normalized_texts
 
 
-def _embedding_item_index(item: object) -> int:
-    index = getattr(item, "index", None)
-    if isinstance(index, bool) or not isinstance(index, int):
-        raise EmbeddingResponseError("Embedding 返回索引格式不正确")
-    return index
-
-
 def _normalize_embedding(raw_embedding: list[object]) -> list[float]:
     embedding: list[float] = []
     for value in raw_embedding:
@@ -145,3 +121,26 @@ def _normalize_embedding(raw_embedding: list[object]) -> list[float]:
             raise EmbeddingResponseError("Embedding 向量必须全部是数字")
         embedding.append(float(value))
     return embedding
+
+
+def build_openai_embedding_client(config: EmbeddingConfig) -> OpenAI:
+    """根据 Embedding 配置构造 OpenAI-compatible 客户端。"""
+
+    if config.format is not EmbeddingFormat.OPENAI_EMBEDDINGS:
+        raise EmbeddingConfigurationError(f"不支持的 Embedding 请求格式：{config.format.value}")
+
+    try:
+        return OpenAI(
+            api_key=config.api_key,
+            base_url=config.base_url,
+            timeout=config.timeout_seconds,
+            http_client=DefaultHttpxClient(trust_env=False),
+        )
+    except Exception as error:
+        raise EmbeddingConfigurationError(f"Embedding 客户端初始化失败：{error}") from error
+
+
+def build_rigel_embedding(config: EmbeddingConfig) -> RigelEmbedding:
+    """构造生产路径使用的 Embedding 客户端。"""
+
+    return RigelEmbedding(config, openai_client=build_openai_embedding_client(config))

@@ -1,4 +1,4 @@
-"""GraphRAG-SDK 连接配置。"""
+"""GraphRAG 图数据库连接配置。"""
 
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ GRAPHRAG_CONFIG_SECTION_NAME = "graphrag"
 
 
 class GraphRAGConfigurationError(ValueError):
-    """GraphRAG-SDK 配置不可用。"""
+    """GraphRAG 配置不可用。"""
 
 
 @dataclass(frozen=True, slots=True)
 class GraphRAGConfig:
-    """GraphRAG-SDK 使用的 FalkorDB 服务连接配置。"""
+    """GraphRAG 使用的 FalkorDB 服务连接配置。"""
 
     host: str
     port: int

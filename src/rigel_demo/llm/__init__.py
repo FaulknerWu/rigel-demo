@@ -9,7 +9,14 @@ from rigel_demo.config import (
     LLMConfigSection,
     LLMConfigurationError,
 )
-from rigel_demo.llm.client import LLMMessage, LLMRequestError, LLMResponseError, RigelLLM
+from rigel_demo.llm.client import (
+    LLMMessage,
+    LangChainSummaryClient,
+    build_langchain_chat_model,
+    extract_message_text,
+    normalize_messages,
+    to_langchain_messages,
+)
 
 __all__ = [
     "DEFAULT_CHAT_SYSTEM_PROMPT",
@@ -18,7 +25,9 @@ __all__ = [
     "LLMConfigSection",
     "LLMConfigurationError",
     "LLMMessage",
-    "LLMRequestError",
-    "LLMResponseError",
-    "RigelLLM",
+    "LangChainSummaryClient",
+    "build_langchain_chat_model",
+    "extract_message_text",
+    "normalize_messages",
+    "to_langchain_messages",
 ]

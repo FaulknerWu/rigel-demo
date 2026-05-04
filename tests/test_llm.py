@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import patch
 
 from rigel_demo.llm import (
     DEFAULT_CHAT_SYSTEM_PROMPT,
@@ -13,8 +14,8 @@ from rigel_demo.llm import (
     LLMConfigSection,
     LLMConfigurationError,
     LLMMessage,
-    LLMResponseError,
-    RigelLLM,
+    LangChainSummaryClient,
+    build_langchain_chat_model,
 )
 
 
@@ -218,49 +219,60 @@ class LLMConfigTest(TestCase):
                 LLMConfig.from_repository(Path(workspace))
 
 
-class RigelLLMTest(TestCase):
-    def test_generate_reply_uses_chat_completions_request_shape(self) -> None:
-        fake_client = _FakeOpenAIClient()
+class LangChainLLMTest(TestCase):
+    def test_build_langchain_chat_model_uses_project_config(self) -> None:
         config = _config(temperature=0, max_output_tokens=300)
-        llm = RigelLLM(config, openai_client=fake_client)
 
-        reply = llm.generate_reply([LLMMessage(role="user", content="分析 Controller")])
+        with patch("langchain_openai.ChatOpenAI", _FakeChatOpenAI):
+            chat_model = build_langchain_chat_model(config)
 
-        self.assertEqual(reply, "Chat 回复")
         self.assertEqual(
-            fake_client.chat.completions.request_body,
+            chat_model.kwargs,
             {
                 "model": "test-model",
-                "messages": [
-                    {"role": "system", "content": "系统提示"},
-                    {"role": "user", "content": "分析 Controller"},
-                ],
+                "api_key": "test-key",
+                "timeout": 30,
                 "temperature": 0,
-                "max_completion_tokens": 300,
+                "model_kwargs": {"max_completion_tokens": 300},
             },
         )
 
-    def test_generate_reply_rejects_blank_message_content(self) -> None:
-        fake_client = _FakeOpenAIClient()
-        llm = RigelLLM(_config(), openai_client=fake_client)
+    def test_summary_client_invokes_chatopenai_with_system_prompt(self) -> None:
+        fake_model = _FakeChatModel()
+        summary_client = LangChainSummaryClient(_config(), chat_model=fake_model)
 
-        with self.assertRaisesRegex(LLMResponseError, "消息内容不能为空"):
-            llm.generate_reply([LLMMessage(role="user", content="   ")])
-
-        self.assertEqual(fake_client.chat.completions.request_body, {})
-
-    def test_generate_reply_strips_messages_before_request(self) -> None:
-        fake_client = _FakeOpenAIClient()
-        llm = RigelLLM(_config(), openai_client=fake_client)
-
-        reply = llm.generate_reply([LLMMessage(role="user", content="  分析 Controller  ")])
+        reply = summary_client.generate_reply([LLMMessage(role="user", content="分析 Controller")])
 
         self.assertEqual(reply, "Chat 回复")
         self.assertEqual(
-            fake_client.chat.completions.request_body["messages"],
+            fake_model.messages,
             [
-                {"role": "system", "content": "系统提示"},
-                {"role": "user", "content": "分析 Controller"},
+                ("system", "系统提示"),
+                ("user", "分析 Controller"),
+            ],
+        )
+
+    def test_summary_client_rejects_blank_message_content(self) -> None:
+        fake_model = _FakeChatModel()
+        summary_client = LangChainSummaryClient(_config(), chat_model=fake_model)
+
+        with self.assertRaisesRegex(ValueError, "消息内容不能为空"):
+            summary_client.generate_reply([LLMMessage(role="user", content="   ")])
+
+        self.assertEqual(fake_model.messages, [])
+
+    def test_generate_reply_strips_messages_before_request(self) -> None:
+        fake_model = _FakeChatModel()
+        summary_client = LangChainSummaryClient(_config(), chat_model=fake_model)
+
+        reply = summary_client.generate_reply([LLMMessage(role="user", content="  分析 Controller  ")])
+
+        self.assertEqual(reply, "Chat 回复")
+        self.assertEqual(
+            fake_model.messages,
+            [
+                ("system", "系统提示"),
+                ("user", "分析 Controller"),
             ],
         )
 
@@ -296,16 +308,16 @@ def _config(
     )
 
 
-class _FakeOpenAIClient:
-    def __init__(self) -> None:
-        self.chat = SimpleNamespace(completions=_FakeChatCompletionsResource())
+class _FakeChatOpenAI:
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
 
 
-class _FakeChatCompletionsResource:
-    def __init__(self) -> None:
-        self.request_body: dict[str, object] = {}
+class _FakeChatModel:
+    def __init__(self, response: str = "Chat 回复") -> None:
+        self.messages: list[tuple[str, str]] = []
+        self.response = response
 
-    def create(self, **request_body: object) -> SimpleNamespace:
-        self.request_body = request_body
-        message = SimpleNamespace(content="Chat 回复")
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+    def invoke(self, messages: list[tuple[str, str]]) -> SimpleNamespace:
+        self.messages = messages
+        return SimpleNamespace(content=self.response)

@@ -12,7 +12,7 @@ Rigel Demo 是一个本地代码语义图谱演示项目。它面向 Java 仓库
 - 图数据库持久化：使用 FalkorDBLite 在当前仓库 `.rigel/falkordb.db` 保存图谱，并支持 Cypher 查询和向量索引。
 - 摘要与向量召回：为 Module、File、Entity 生成检索摘要和 Embedding，通过 Summary 向量索引把自然语言问题映射到图谱节点。
 - 演示级增量索引：通过 Java 文件内容哈希识别新增、修改、删除和跳过文件，更新本地图谱。
-- Web 演示界面：左侧展示代码图谱，右侧提供基于 GraphRAG-SDK 的自然语言问答入口。
+- Web 演示界面：左侧展示代码图谱，右侧提供基于 LangGraph 的自然语言问答入口。
 
 ## 技术栈
 
@@ -21,7 +21,7 @@ Rigel Demo 是一个本地代码语义图谱演示项目。它面向 Java 仓库
 - Tree-sitter / tree-sitter-java
 - multilspy
 - FalkorDBLite / FalkorDB
-- GraphRAG-SDK
+- LangChain / LangGraph
 - OpenAI SDK 兼容的 Chat Completions 与 Embeddings 接口
 - React 19 / Vite / Tailwind CSS / react-force-graph-2d
 - uv
@@ -34,7 +34,7 @@ Rigel Demo 的主链路分为五步：
 2. 语义补全：Tree-sitter 先定位可能存在语义关系的位置，LSP 再确认跨文件定义、引用和继承目标，写入 `DEPENDS_ON`、`SPECIALIZES`、`ALIASES` 等边。
 3. 图谱持久化：GraphIR 被幂等写入 FalkorDBLite，节点带有 `RigelNode` 通用标签和具体类型标签，关系使用稳定 ID 合并。
 4. 摘要索引：系统为模块、文件和实体生成中文检索摘要，写入 Summary 节点，并在 `Summary.embedding` 上创建 FalkorDB 原生向量索引。
-5. 检索问答：用户问题先转为向量召回 Summary，再沿 `DESCRIBES` 找到种子节点，并通过图谱邻接关系补充上下文；Web Chat 通过 GraphRAG-SDK 查询同一份本地图谱。
+5. 检索问答：用户问题先转为只读 Cypher 查询，再通过 LangGraph 状态机读取同一份 FalkorDBLite 图谱上下文并生成中文回答；摘要向量召回用于索引后的检索上下文能力。
 
 ## 数据模型
 
@@ -179,7 +179,7 @@ uv run --project /home/wu/workspace/rigel-demo rigel web
 `.rigel/config.json` 按功能分为五段：
 
 - `web`：Web 后端监听地址、端口和是否自动打开浏览器。
-- `graphrag`：GraphRAG-SDK 连接 FalkorDB 服务所需的 host、port、username、password。
+- `graphrag`：GraphRAG chat 连接 FalkorDB 服务所需的 host、port、username、password。
 - `chat`：Web Chat 使用的 Chat Completions 模型配置。
 - `summary`：索引阶段生成 Summary 文本的模型配置。
 - `embedding`：摘要向量和查询向量使用的 Embedding 模型配置。

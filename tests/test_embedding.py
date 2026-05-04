@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import patch
 
 from rigel_demo.embedding import (
     EmbeddingConfig,
@@ -13,6 +14,7 @@ from rigel_demo.embedding import (
     EmbeddingInputMode,
     EmbeddingResponseError,
     RigelEmbedding,
+    build_rigel_embedding,
 )
 
 
@@ -87,6 +89,28 @@ class EmbeddingConfigTest(TestCase):
 
 
 class RigelEmbeddingTest(TestCase):
+    def test_requires_explicit_openai_client(self) -> None:
+        with self.assertRaisesRegex(EmbeddingConfigurationError, "openai_client"):
+            RigelEmbedding(_embedding_config())
+
+    def test_build_rigel_embedding_creates_configured_openai_client(self) -> None:
+        with patch("rigel_demo.embedding.client.OpenAI", _FakeOpenAIClient), patch(
+            "rigel_demo.embedding.client.DefaultHttpxClient",
+            _FakeHttpxClient,
+        ):
+            embedding = build_rigel_embedding(_embedding_config())
+
+        self.assertIsInstance(embedding, RigelEmbedding)
+        self.assertEqual(
+            embedding._client.kwargs,
+            {
+                "api_key": "embedding-key",
+                "base_url": None,
+                "timeout": 30,
+                "http_client": _FakeHttpxClient(trust_env=False),
+            },
+        )
+
     def test_embed_texts_uses_openai_embeddings_request_shape(self) -> None:
         fake_client = _FakeOpenAIEmbeddingClient()
         embedding = RigelEmbedding(_embedding_config(), openai_client=fake_client)
@@ -104,7 +128,7 @@ class RigelEmbeddingTest(TestCase):
             },
         )
 
-    def test_embed_texts_rejects_duplicate_response_indexes(self) -> None:
+    def test_embed_texts_uses_response_data_order_without_index_validation(self) -> None:
         fake_client = _FakeOpenAIEmbeddingClient(
             response_data=[
                 SimpleNamespace(index=0, embedding=[1.0, 0.0, 0.0]),
@@ -113,19 +137,9 @@ class RigelEmbeddingTest(TestCase):
         )
         embedding = RigelEmbedding(_embedding_config(), openai_client=fake_client)
 
-        with self.assertRaisesRegex(EmbeddingResponseError, "索引"):
-            embedding.embed_texts(["PaymentService", "OrderRepository"])
+        vectors = embedding.embed_texts(["PaymentService", "OrderRepository"])
 
-    def test_embed_texts_rejects_non_integer_response_index(self) -> None:
-        fake_client = _FakeOpenAIEmbeddingClient(
-            response_data=[
-                SimpleNamespace(index="0", embedding=[1.0, 0.0, 0.0]),
-            ]
-        )
-        embedding = RigelEmbedding(_embedding_config(), openai_client=fake_client)
-
-        with self.assertRaisesRegex(EmbeddingResponseError, "索引格式"):
-            embedding.embed_texts(["PaymentService"])
+        self.assertEqual(vectors, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
     def test_embed_texts_rejects_blank_input_text(self) -> None:
         fake_client = _FakeOpenAIEmbeddingClient()
@@ -202,6 +216,20 @@ def _embedding_config(
 class _FakeOpenAIEmbeddingClient:
     def __init__(self, response_data: list[SimpleNamespace] | None = None) -> None:
         self.embeddings = _FakeEmbeddingsResource(response_data)
+
+
+class _FakeOpenAIClient:
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.embeddings = _FakeEmbeddingsResource()
+
+
+class _FakeHttpxClient:
+    def __init__(self, *, trust_env: bool) -> None:
+        self.trust_env = trust_env
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _FakeHttpxClient) and self.trust_env == other.trust_env
 
 
 class _FakeEmbeddingsResource:

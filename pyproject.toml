@@ -8,8 +8,11 @@ dependencies = [
     "falkordblite>=0.9.0",
     "fastapi>=0.136.1",
     "falkordb>=1.2.0",
-    "graphrag-sdk==0.8.2",
-    "multilspy>=0.0.15",
+    "langchain>=1.1.4",
+    "langchain-community>=0.4.1",
+    "langchain-openai>=1.1.4",
+    "langgraph>=1.0.4",
+    "multilspy",
     "openai>=2.32.0",
     "pydantic>=2.13.3",
     "tree-sitter>=0.25.2",
@@ -40,4 +43,12 @@ exclude = [
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+]
+
+[tool.uv.sources]
+multilspy = { git = "https://github.com/microsoft/multilspy.git", tag = "v0.1.0" }
+
+[tool.uv]
+override-dependencies = [
+    "requests>=2.32.5",
 ]

@@ -9,7 +9,7 @@ from typing import Literal
 
 from rigel_demo.entities import Repository
 from rigel_demo.graph.ir import GraphEdge, GraphIR, NodeType
-from rigel_demo.embedding import EmbeddingConfig, RigelEmbedding
+from rigel_demo.embedding import EmbeddingConfig, RigelEmbedding, build_rigel_embedding
 from rigel_demo.project.summaries import (
     SummaryProgress,
     SummaryEmbeddingClient,
@@ -27,7 +27,7 @@ from rigel_demo.project.java_targets import (
     JavaFileIndexTarget,
     iter_java_targets,
 )
-from rigel_demo.llm import LLMConfig, LLMConfigSection, RigelLLM
+from rigel_demo.llm import LLMConfig, LLMConfigSection, LangChainSummaryClient
 
 RepositoryIndexProgressStage = Literal[
     "java_parse",
@@ -89,16 +89,16 @@ def index_repository(
     repository_path: Path,
     *,
     embedding_client: SummaryEmbeddingClient | RigelEmbedding | None = None,
-    summary_client: SummaryTextClient | RigelLLM | None = None,
+    summary_client: SummaryTextClient | None = None,
     progress_reporter: RepositoryIndexProgressReporter | None = None,
 ) -> RepositoryIndexResult:
     """扫描仓库源码，并通过真实 Java LSP 补全跨文件语义边。"""
 
     resolved_repository_path = repository_path.resolve()
-    active_embedding_client = embedding_client or RigelEmbedding(
+    active_embedding_client = embedding_client or build_rigel_embedding(
         EmbeddingConfig.from_repository(resolved_repository_path)
     )
-    active_summary_client = summary_client or RigelLLM(
+    active_summary_client = summary_client or LangChainSummaryClient(
         LLMConfig.from_repository(resolved_repository_path, LLMConfigSection.SUMMARY)
     )
     structure_result = _build_java_structure_graph(
@@ -138,7 +138,7 @@ def index_repository_incremental(
     *,
     previous_file_hashes: dict[str, str],
     embedding_client: SummaryEmbeddingClient | RigelEmbedding | None = None,
-    summary_client: SummaryTextClient | RigelLLM | None = None,
+    summary_client: SummaryTextClient | None = None,
     progress_reporter: RepositoryIndexProgressReporter | None = None,
 ) -> RepositoryIncrementalIndexResult:
     """构建新增和修改 Java 文件对应的可写入增量图谱。"""
@@ -157,10 +157,10 @@ def index_repository_incremental(
             indexed_file_count=0,
         )
 
-    active_embedding_client = embedding_client or RigelEmbedding(
+    active_embedding_client = embedding_client or build_rigel_embedding(
         EmbeddingConfig.from_repository(resolved_repository_path)
     )
-    active_summary_client = summary_client or RigelLLM(
+    active_summary_client = summary_client or LangChainSummaryClient(
         LLMConfig.from_repository(resolved_repository_path, LLMConfigSection.SUMMARY)
     )
 

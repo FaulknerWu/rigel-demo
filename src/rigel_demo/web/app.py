@@ -32,6 +32,7 @@ from rigel_demo.query.service import (
 from rigel_demo.embedding import (
     EmbeddingConfig,
     RigelEmbedding,
+    build_rigel_embedding,
 )
 from rigel_demo.llm import (
     LLMMessage,
@@ -244,14 +245,14 @@ def _resolve_embedding_client(
     if provided_client is not None:
         return provided_client
 
-    return RigelEmbedding(EmbeddingConfig.from_repository(repository_path))
+    return build_rigel_embedding(EmbeddingConfig.from_repository(repository_path))
 
 
 def _llm_status(llm_client: RigelChatService) -> dict[str, object]:
     config = llm_client.config
     return {
         "configured": True,
-        "runtime": "graphrag-sdk",
+        "runtime": "langgraph",
         "provider": config.provider,
         "model": config.model,
         "base_url": config.base_url,

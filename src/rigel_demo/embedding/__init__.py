@@ -8,7 +8,13 @@ from rigel_demo.config import (
     EmbeddingFormat,
     EmbeddingInputMode,
 )
-from rigel_demo.embedding.client import EmbeddingRequestError, EmbeddingResponseError, RigelEmbedding
+from rigel_demo.embedding.client import (
+    EmbeddingRequestError,
+    EmbeddingResponseError,
+    RigelEmbedding,
+    build_openai_embedding_client,
+    build_rigel_embedding,
+)
 
 __all__ = [
     "EmbeddingConfig",
@@ -18,4 +24,6 @@ __all__ = [
     "EmbeddingRequestError",
     "EmbeddingResponseError",
     "RigelEmbedding",
+    "build_openai_embedding_client",
+    "build_rigel_embedding",
 ]

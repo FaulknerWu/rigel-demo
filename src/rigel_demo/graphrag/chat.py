@@ -1,16 +1,15 @@
-"""基于 GraphRAG-SDK 的 Rigel chat service。"""
+"""基于 LangGraph 的 Rigel GraphRAG chat service。"""
 
 from __future__ import annotations
 
-import os
-from collections.abc import Sequence
+import re
 import socket
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypedDict
 
 from rigel_demo.config import GraphRAGConfig
-from rigel_demo.graphrag.ontology import build_rigel_ontology
 from rigel_demo.graphrag.prompts import (
     RIGEL_CYPHER_GENERATION_PROMPT,
     RIGEL_CYPHER_GENERATION_PROMPT_WITH_HISTORY,
@@ -18,11 +17,29 @@ from rigel_demo.graphrag.prompts import (
     RIGEL_QA_PROMPT,
     RIGEL_QA_SYSTEM_INSTRUCTION,
 )
-from rigel_demo.llm import LLMConfig, LLMConfigSection, LLMMessage
+from rigel_demo.llm import (
+    LLMConfig,
+    LLMConfigSection,
+    LLMMessage,
+    build_langchain_chat_model,
+    extract_message_text,
+    normalize_messages,
+)
+
+SAFE_QUERY_LIMIT = 20
+RIGEL_ALLOWED_NODE_TYPES = ("Repository", "Module", "File", "Entity", "Anchor", "Summary")
+RIGEL_ALLOWED_RELATIONSHIPS = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES", "HAS_ANCHOR", "DESCRIBES")
+_FORBIDDEN_CYPHER_PATTERN = re.compile(r"\b(CREATE|MERGE|SET|DELETE|REMOVE|DROP|CALL)\b", re.IGNORECASE)
+_LIMIT_PATTERN = re.compile(r"\bLIMIT\s+\d+\b", re.IGNORECASE)
+_CODE_FENCE_PATTERN = re.compile(r"^```(?:cypher)?\s*|\s*```$", re.IGNORECASE)
+_REGEX_MATCH_PATTERN = re.compile(
+    r"(?P<expression>[A-Za-z_][\w.]*(?:\([^)]*\))?)\s*=~\s*(?P<quote>['\"])(?P<pattern>.*?)(?P=quote)",
+    re.IGNORECASE,
+)
 
 
 class RigelGraphRAGError(RuntimeError):
-    """GraphRAG-SDK 调用失败。"""
+    """GraphRAG 调用失败。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +52,7 @@ class GraphRAGTrace:
 
 @dataclass(frozen=True, slots=True)
 class GraphRAGReply:
-    """GraphRAG-SDK 生成结果。"""
+    """GraphRAG 生成结果。"""
 
     content: str
     traces: list[GraphRAGTrace]
@@ -43,20 +60,22 @@ class GraphRAGReply:
 
 @dataclass(frozen=True, slots=True)
 class EmbeddedFalkorDBRuntime:
-    """GraphRAG-SDK 访问本地 FalkorDBLite 的运行时连接。"""
+    """LangChain 访问本地 FalkorDBLite 的运行时连接。"""
 
     client: Any
     host: str
     port: int
 
 
-@dataclass(frozen=True, slots=True)
-class GraphRAGChatRuntime:
-    """GraphRAG chat session 及其依赖的本地数据库运行时。"""
-
-    chat_session: Any
-    knowledge_graph: Any | None = None
-    embedded_database: EmbeddedFalkorDBRuntime | None = None
+class GraphRAGState(TypedDict):
+    messages: list[LLMMessage]
+    question: str
+    last_answer: str | None
+    schema: str
+    cypher: str
+    context: list[dict[str, object]]
+    answer: str
+    traces: list[GraphRAGTrace]
 
 
 class RigelChatService(Protocol):
@@ -66,8 +85,8 @@ class RigelChatService(Protocol):
         """按对话历史生成回答。"""
 
 
-class GraphRAGSDKChatService:
-    """通过 KnowledgeGraph.chat_session().send_message() 查询 Rigel 图谱。"""
+class LangGraphChatService:
+    """使用 LangGraph 显式状态机查询 Rigel 图谱并生成回答。"""
 
     def __init__(
         self,
@@ -76,67 +95,164 @@ class GraphRAGSDKChatService:
         graphrag_config: GraphRAGConfig,
         graph_name: str,
         database_path: Path | None = None,
+        chat_model: Any | None = None,
+        graph: Any | None = None,
     ) -> None:
         self.config = config
-        self._environment_snapshot = _apply_litellm_environment(config)
-        if database_path is None:
-            try:
-                self._runtime = GraphRAGChatRuntime(
-                    chat_session=_build_chat_session(
-                        config=config,
-                        graphrag_config=graphrag_config,
-                        graph_name=graph_name,
-                    )
-                )
-            except Exception:
-                _restore_litellm_environment(self._environment_snapshot)
-                raise
-        else:
-            try:
-                self._runtime = _build_chat_runtime(
-                    config=config,
-                    graphrag_config=graphrag_config,
-                    graph_name=graph_name,
-                    database_path=database_path,
-                )
-            except Exception:
-                _restore_litellm_environment(self._environment_snapshot)
-                raise
-        self._chat_session = self._runtime.chat_session
+        self._graphrag_config = graphrag_config
+        self._graph_name = graph_name
+        self._embedded_database = (
+            _start_embedded_falkordb_runtime(database_path=database_path, host=graphrag_config.host)
+            if database_path is not None
+            else None
+        )
+        self._chat_model = chat_model or build_langchain_chat_model(config)
+        self._graph = graph
+        self._workflow = _build_workflow(self)
 
     def send_messages(self, messages: Sequence[LLMMessage]) -> GraphRAGReply:
+        initial_state = GraphRAGState(
+            messages=list(messages),
+            question="",
+            last_answer=None,
+            schema="",
+            cypher="",
+            context=[],
+            answer="",
+            traces=[],
+        )
+        try:
+            result = self._workflow.invoke(initial_state)
+        except RigelGraphRAGError:
+            raise
+        except Exception as error:
+            raise RigelGraphRAGError(f"LangGraph GraphRAG 调用失败：{error}") from error
+
+        answer = str(result.get("answer", "")).strip()
+        if not answer:
+            raise RigelGraphRAGError("LangGraph GraphRAG 未返回可展示文本")
+        return GraphRAGReply(content=answer, traces=list(result.get("traces", [])))
+
+    def close(self) -> None:
+        if self._embedded_database is not None:
+            self._embedded_database.client.close()
+
+    def _prepare_question(self, state: GraphRAGState) -> dict[str, object]:
+        messages = normalize_messages(state["messages"])
         if not messages:
             raise RigelGraphRAGError("消息列表不能为空")
         if messages[-1].role != "user":
             raise RigelGraphRAGError("最后一条消息必须来自用户")
 
-        try:
-            response = self._send_history(messages)
-        except Exception as error:
-            raise RigelGraphRAGError(f"GraphRAG-SDK 调用失败：{error}") from error
-
-        return GraphRAGReply(
-            content=_response_text(response),
-            traces=_response_traces(response),
+        last_answer = next(
+            (message.content for message in reversed(messages[:-1]) if message.role == "assistant"),
+            None,
         )
+        return {
+            "messages": messages,
+            "question": messages[-1].content,
+            "last_answer": last_answer,
+        }
 
-    def _send_history(self, messages: Sequence[LLMMessage]) -> object:
-        response: object = None
-        for message in messages:
-            if message.role != "user":
-                continue
-            response = self._chat_session.send_message(message.content)
-        if response is None:
-            raise RigelGraphRAGError("消息列表中没有用户消息")
-        return response
+    def _load_schema(self, _state: GraphRAGState) -> dict[str, object]:
+        graph = self._active_graph()
+        refresh_schema = getattr(graph, "refresh_schema", None) or getattr(graph, "refreshSchema", None)
+        if callable(refresh_schema):
+            refresh_schema()
+        schema_value = getattr(graph, "get_schema", None)
+        if callable(schema_value):
+            schema_text = str(schema_value())
+        elif isinstance(schema_value, str):
+            schema_text = schema_value
+        else:
+            schema_text = str(schema_value or "")
+        return {"schema": _rigel_schema_instruction(schema_text)}
 
-    def close(self) -> None:
-        if self._runtime.knowledge_graph is not None:
-            self._runtime.knowledge_graph.db.close()
-        if self._runtime.embedded_database is not None:
-            self._runtime.embedded_database.client.close()
-        _restore_litellm_environment(self._environment_snapshot)
-        self._environment_snapshot = {}
+    def _generate_cypher(self, state: GraphRAGState) -> dict[str, object]:
+        prompt_template = (
+            RIGEL_CYPHER_GENERATION_PROMPT_WITH_HISTORY
+            if state.get("last_answer")
+            else RIGEL_CYPHER_GENERATION_PROMPT
+        )
+        user_prompt = prompt_template.format(
+            question=state["question"],
+            last_answer=state.get("last_answer") or "",
+        )
+        response = self._chat_model.invoke(
+            [
+                ("system", RIGEL_CYPHER_SYSTEM_INSTRUCTION.format(ontology=state["schema"])),
+                (
+                    "user",
+                    f"{user_prompt}\n\n"
+                    "只输出一条 Cypher，不要输出解释或 Markdown。\n"
+                    "FalkorDB 不支持 =~ 正则匹配；模糊匹配必须使用 CONTAINS、STARTS WITH 或 ENDS WITH。",
+                ),
+            ]
+        )
+        cypher = _strip_cypher_response(extract_message_text(response))
+        return {"cypher": cypher}
+
+    def _validate_cypher(self, state: GraphRAGState) -> dict[str, object]:
+        cypher = _sanitize_generated_cypher(state["cypher"])
+        if _is_safe_readonly_cypher(cypher):
+            return {"cypher": cypher}
+        return {
+            "answer": "无法生成安全只读查询，因此没有执行图数据库查询。",
+            "context": [],
+            "traces": [GraphRAGTrace(name="cypher", args={"query": cypher, "rejected": True})],
+        }
+
+    def _execute_cypher(self, state: GraphRAGState) -> dict[str, object]:
+        cypher = _apply_safe_limit(state["cypher"])
+        try:
+            context = _normalize_query_result(self._active_graph().query(cypher))
+        except Exception as error:
+            return {
+                "cypher": cypher,
+                "context": [],
+                "traces": [
+                    GraphRAGTrace(
+                        name="cypher",
+                        args={"query": cypher, "error": f"图查询执行失败，已跳过：{error}"},
+                    ),
+                    GraphRAGTrace(name="context", args={"items": 0}),
+                ],
+            }
+        traces = [
+            GraphRAGTrace(name="cypher", args={"query": cypher}),
+            GraphRAGTrace(name="context", args={"items": len(context)}),
+        ]
+        return {"cypher": cypher, "context": context, "traces": traces}
+
+    def _generate_answer(self, state: GraphRAGState) -> dict[str, object]:
+        if state.get("answer"):
+            return {}
+
+        response = self._chat_model.invoke(
+            [
+                ("system", f"{self.config.system_prompt}\n\n{RIGEL_QA_SYSTEM_INSTRUCTION}"),
+                (
+                    "user",
+                    RIGEL_QA_PROMPT.format(
+                        question=state["question"],
+                        context=state["context"],
+                        cypher=state["cypher"],
+                    ),
+                ),
+            ]
+        )
+        answer = extract_message_text(response)
+        if not answer:
+            raise RigelGraphRAGError("回答模型未返回可展示文本")
+        return {"answer": answer}
+
+    def _active_graph(self) -> Any:
+        if self._graph is None:
+            self._graph = _build_falkordb_graph(
+                config=_runtime_graphrag_config(self._graphrag_config, self._embedded_database),
+                graph_name=self._graph_name,
+            )
+        return self._graph
 
 
 def build_graphrag_chat_service(
@@ -144,10 +260,10 @@ def build_graphrag_chat_service(
     repository_path: Path,
     graph_name: str,
     database_path: Path | None = None,
-) -> GraphRAGSDKChatService:
+) -> LangGraphChatService:
     llm_config = LLMConfig.from_repository(repository_path, LLMConfigSection.CHAT)
     graphrag_config = GraphRAGConfig.from_repository(repository_path)
-    return GraphRAGSDKChatService(
+    return LangGraphChatService(
         config=llm_config,
         graphrag_config=graphrag_config,
         graph_name=graph_name,
@@ -155,61 +271,48 @@ def build_graphrag_chat_service(
     )
 
 
-def _build_chat_session(
-    *,
-    config: LLMConfig,
-    graphrag_config: GraphRAGConfig,
-    graph_name: str,
-) -> Any:
-    return _build_chat_runtime(
-        config=config,
-        graphrag_config=graphrag_config,
-        graph_name=graph_name,
-        database_path=None,
-    ).chat_session
+def _build_workflow(service: LangGraphChatService) -> Any:
+    from langgraph.graph import END, StateGraph
 
-
-def _build_chat_runtime(
-    *,
-    config: LLMConfig,
-    graphrag_config: GraphRAGConfig,
-    graph_name: str,
-    database_path: Path | None,
-) -> GraphRAGChatRuntime:
-    from graphrag_sdk import KnowledgeGraph
-    from graphrag_sdk.model_config import KnowledgeGraphModelConfig
-    from graphrag_sdk.models.litellm import LiteModel
-
-    embedded_database = _start_embedded_falkordb_runtime(
-        database_path=database_path,
-        host=graphrag_config.host,
-    ) if database_path is not None else None
-    active_graphrag_config = _runtime_graphrag_config(graphrag_config, embedded_database)
-
-    ontology = build_rigel_ontology(config=active_graphrag_config, graph_name=graph_name)
-    model = LiteModel(
-        model_name=_litellm_model_name(config),
-        additional_params=_litellm_additional_params(config),
+    workflow = StateGraph(GraphRAGState)
+    workflow.add_node("prepare_question", service._prepare_question)
+    workflow.add_node("load_schema", service._load_schema)
+    workflow.add_node("generate_cypher", service._generate_cypher)
+    workflow.add_node("validate_cypher", service._validate_cypher)
+    workflow.add_node("execute_cypher", service._execute_cypher)
+    workflow.add_node("generate_answer", service._generate_answer)
+    workflow.set_entry_point("prepare_question")
+    workflow.add_edge("prepare_question", "load_schema")
+    workflow.add_edge("load_schema", "generate_cypher")
+    workflow.add_edge("generate_cypher", "validate_cypher")
+    workflow.add_conditional_edges(
+        "validate_cypher",
+        _route_after_validation,
+        {
+            "execute": "execute_cypher",
+            "answer": "generate_answer",
+        },
     )
-    model_config = KnowledgeGraphModelConfig.with_model(model)
-    kg = KnowledgeGraph(
-        name=graph_name,
-        model_config=model_config,
-        ontology=ontology,
-        host=active_graphrag_config.host,
-        port=active_graphrag_config.port,
-        username=active_graphrag_config.username,
-        password=active_graphrag_config.password,
-        cypher_system_instruction=RIGEL_CYPHER_SYSTEM_INSTRUCTION,
-        qa_system_instruction=f"{config.system_prompt}\n\n{RIGEL_QA_SYSTEM_INSTRUCTION}",
-        cypher_gen_prompt=RIGEL_CYPHER_GENERATION_PROMPT,
-        cypher_gen_prompt_history=RIGEL_CYPHER_GENERATION_PROMPT_WITH_HISTORY,
-        qa_prompt=RIGEL_QA_PROMPT,
-    )
-    return GraphRAGChatRuntime(
-        chat_session=kg.chat_session(),
-        knowledge_graph=kg,
-        embedded_database=embedded_database,
+    workflow.add_edge("execute_cypher", "generate_answer")
+    workflow.add_edge("generate_answer", END)
+    return workflow.compile()
+
+
+def _route_after_validation(state: GraphRAGState) -> str:
+    if state.get("answer"):
+        return "answer"
+    return "execute"
+
+
+def _build_falkordb_graph(*, config: GraphRAGConfig, graph_name: str) -> Any:
+    from langchain_community.graphs import FalkorDBGraph
+
+    return FalkorDBGraph(
+        database=graph_name,
+        host=config.host,
+        port=config.port,
+        username=config.username or "",
+        password=config.password or "",
     )
 
 
@@ -254,112 +357,106 @@ def _reserve_local_port(host: str) -> int:
         return int(server_socket.getsockname()[1])
 
 
-def _litellm_additional_params(config: LLMConfig) -> dict[str, object] | None:
-    if config.base_url is None:
+def _rigel_schema_instruction(schema_text: str) -> str:
+    return (
+        f"{schema_text}\n\n"
+        f"Rigel 允许的节点类型：{', '.join(RIGEL_ALLOWED_NODE_TYPES)}。\n"
+        f"Rigel 允许的关系类型：{', '.join(RIGEL_ALLOWED_RELATIONSHIPS)}。"
+    )
+
+
+def _strip_cypher_response(response_text: str) -> str:
+    stripped_text = response_text.strip()
+    stripped_text = _CODE_FENCE_PATTERN.sub("", stripped_text).strip()
+    return stripped_text
+
+
+def _sanitize_generated_cypher(cypher: str) -> str:
+    sanitized_cypher = _strip_cypher_response(cypher).strip().rstrip(";").strip()
+    sanitized_cypher = _remove_unsupported_path_helpers(sanitized_cypher)
+    return _rewrite_regex_matches_for_falkordb(sanitized_cypher)
+
+
+def _remove_unsupported_path_helpers(cypher: str) -> str:
+    sanitized_cypher = re.sub(r"\b(allShortestPaths|shortestPath)\s*\(", "(", cypher, flags=re.IGNORECASE)
+    return re.sub(r"\bpath\s*=\s*", "", sanitized_cypher, flags=re.IGNORECASE)
+
+
+def _rewrite_regex_matches_for_falkordb(cypher: str) -> str:
+    """把常见 LLM 正则匹配改写为 FalkorDB 支持的字符串匹配。"""
+
+    def replace_regex_match(match: re.Match[str]) -> str:
+        expression = match.group("expression")
+        regex_pattern = match.group("pattern")
+        literal = _literal_from_simple_contains_regex(regex_pattern)
+        if literal is None:
+            return match.group(0)
+        return f"toLower(coalesce({expression}, '')) CONTAINS '{_cypher_string_literal(literal.lower())}'"
+
+    return _REGEX_MATCH_PATTERN.sub(replace_regex_match, cypher)
+
+
+def _literal_from_simple_contains_regex(regex_pattern: str) -> str | None:
+    normalized_pattern = regex_pattern.strip()
+    normalized_pattern = re.sub(r"^\(\?[iI]\)", "", normalized_pattern)
+    normalized_pattern = normalized_pattern.removeprefix(".*").removesuffix(".*")
+    if not normalized_pattern or re.search(r"(?<!\\)[\\\[\]{}()+?|^$]", normalized_pattern):
         return None
-    return {"api_base": config.base_url}
+    return normalized_pattern.replace(r"\.", ".").replace(r"\-", "-").replace(r"\_", "_")
 
 
-def _apply_litellm_environment(config: LLMConfig) -> dict[str, str | None]:
-    environment_values = _litellm_environment_values(config)
-    snapshot: dict[str, str | None] = {}
-    for environment_name, environment_value in environment_values.items():
-        snapshot[environment_name] = os.environ.get(environment_name)
-        os.environ[environment_name] = environment_value
-    return snapshot
+def _cypher_string_literal(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _restore_litellm_environment(snapshot: dict[str, str | None]) -> None:
-    for environment_name, previous_value in snapshot.items():
-        if previous_value is None:
-            os.environ.pop(environment_name, None)
-        else:
-            os.environ[environment_name] = previous_value
+def _is_safe_readonly_cypher(cypher: str) -> bool:
+    if not cypher:
+        return False
+    if ";" in cypher:
+        return False
+    if not cypher.upper().startswith("MATCH "):
+        return False
+    if "=~" in cypher:
+        return False
+    return _FORBIDDEN_CYPHER_PATTERN.search(cypher) is None
 
 
-def _litellm_api_key_environment_names(provider: str) -> tuple[str, ...]:
-    match provider:
-        case "openai":
-            return ("OPENAI_API_KEY",)
-        case "azure":
-            return ("AZURE_API_KEY",)
-        case "anthropic":
-            return ("ANTHROPIC_API_KEY",)
-        case "cohere":
-            return ("COHERE_API_KEY",)
-        case "openrouter":
-            return ("OPENROUTER_API_KEY",)
-        case "gemini":
-            return ("GOOGLE_API_KEY", "GEMINI_API_KEY")
-        case "groq":
-            return ("GROQ_API_KEY",)
-        case _:
-            return (f"{provider.upper().replace('-', '_')}_API_KEY",)
+def _apply_safe_limit(cypher: str) -> str:
+    stripped_cypher = cypher.strip()
+    if _LIMIT_PATTERN.search(stripped_cypher):
+        return stripped_cypher
+    return f"{stripped_cypher} LIMIT {SAFE_QUERY_LIMIT}"
 
 
-def _litellm_environment_values(config: LLMConfig) -> dict[str, str]:
-    values = {
-        environment_name: config.api_key
-        for environment_name in _litellm_api_key_environment_names(config.provider)
-    }
-    if config.base_url is None:
-        return values
+def _normalize_query_result(result: object) -> list[dict[str, object]]:
+    if isinstance(result, list):
+        return [_normalize_context_item(item) for item in result]
 
-    match config.provider:
-        case "openai":
-            values["OPENAI_API_BASE"] = config.base_url
-        case "azure":
-            values["AZURE_API_BASE"] = config.base_url
-        case "ollama" | "ollama_chat":
-            values["OLLAMA_API_BASE"] = config.base_url
-        case _:
-            values[f"{config.provider.upper().replace('-', '_')}_API_BASE"] = config.base_url
-    return values
+    data = getattr(result, "data", None)
+    if isinstance(data, list):
+        return [_normalize_context_item(item) for item in data]
+
+    result_set = getattr(result, "result_set", None)
+    if isinstance(result_set, list):
+        return [{"row": _normalize_value(row)} for row in result_set]
+
+    return [{"value": _normalize_value(result)}]
 
 
-def _litellm_model_name(config: LLMConfig) -> str:
-    if "/" in config.model:
-        return config.model
-    return f"{config.provider}/{config.model}"
+def _normalize_context_item(item: object) -> dict[str, object]:
+    if isinstance(item, dict):
+        return {str(key): _normalize_value(value) for key, value in item.items()}
+    return {"value": _normalize_value(item)}
 
 
-def _response_text(response: object) -> str:
-    if isinstance(response, str):
-        return response
-
-    value = _response_text_value(response)
-    if isinstance(value, str) and value.strip():
+def _normalize_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): _normalize_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple | set):
+        return [_normalize_value(item) for item in value]
+    if isinstance(value, str | int | float | bool) or value is None:
         return value
-    raise RigelGraphRAGError("GraphRAG-SDK 响应缺少 response 文本")
-
-
-def _response_text_value(response: object) -> object:
-    for field_name in ("response", "answer", "content"):
-        if isinstance(response, dict):
-            value = response.get(field_name)
-        else:
-            value = getattr(response, field_name, None)
-        if value:
-            return value
-    return None
-
-
-def _response_traces(response: object) -> list[GraphRAGTrace]:
-    if not isinstance(response, dict):
-        return []
-    traces: list[GraphRAGTrace] = []
-    cypher = response.get("cypher")
-    if isinstance(cypher, str) and cypher.strip():
-        traces.append(GraphRAGTrace(name="cypher", args={"query": cypher}))
-    context = response.get("context")
-    if context is not None:
-        traces.append(GraphRAGTrace(name="context", args={"items": _context_size(context)}))
-    return traces
-
-
-def _context_size(context: object) -> int:
-    if isinstance(context, list | tuple | set):
-        return len(context)
-    if isinstance(context, dict):
-        return len(context)
-    return 1
+    properties = getattr(value, "properties", None)
+    if isinstance(properties, dict):
+        return {str(key): _normalize_value(item) for key, item in properties.items()}
+    return str(value)

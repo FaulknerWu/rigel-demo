@@ -1,4 +1,4 @@
-"""基于 OpenAI SDK 的 Chat Completions 调用入口。"""
+"""基于 LangChain 的 ChatOpenAI 调用入口。"""
 
 from __future__ import annotations
 
@@ -6,20 +6,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from openai import DefaultHttpxClient, OpenAI, OpenAIError
-
 from rigel_demo.config import LLMConfig, LLMConfigurationError
 
 
 MessageRole = Literal["user", "assistant"]
-
-
-class LLMRequestError(RuntimeError):
-    """LLM 远程请求失败。"""
-
-
-class LLMResponseError(RuntimeError):
-    """LLM 返回内容无法解析。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,84 +20,97 @@ class LLMMessage:
     content: str
 
 
-class RigelLLM:
-    """封装 OpenAI Chat Completions 模型调用。"""
+class LangChainSummaryClient:
+    """使用 LangChain ChatOpenAI 生成检索摘要文本。"""
 
-    def __init__(
-        self,
-        config: LLMConfig,
-        *,
-        openai_client: Any | None = None,
-    ) -> None:
+    def __init__(self, config: LLMConfig, *, chat_model: Any | None = None) -> None:
         self._config = config
-        if openai_client is not None:
-            # 测试或上层托管连接池时直接注入客户端，避免构造函数强依赖真实网络配置。
-            self._client = openai_client
-            return
-
-        try:
-            self._client = OpenAI(
-                api_key=config.api_key,
-                base_url=config.base_url,
-                timeout=config.timeout_seconds,
-                http_client=DefaultHttpxClient(trust_env=False),
-            )
-        except Exception as error:
-            raise LLMConfigurationError(f"LLM 客户端初始化失败：{error}") from error
+        self._chat_model = chat_model or build_langchain_chat_model(config)
 
     @property
     def config(self) -> LLMConfig:
-        """返回当前 LLM 配置。"""
-
         return self._config
 
     def generate_reply(self, messages: Sequence[LLMMessage]) -> str:
-        """根据生成回复。"""
-
-        normalized_messages = _normalize_messages(messages)
+        normalized_messages = normalize_messages(messages)
         if not normalized_messages:
-            raise LLMResponseError("消息列表不能为空")
+            raise ValueError("消息列表不能为空")
 
-        try:
-            return self._generate_with_chat(normalized_messages)
-        except OpenAIError as error:
-            raise LLMRequestError(f"LLM 调用失败：{error}") from error
+        response = self._chat_model.invoke(to_langchain_messages(normalized_messages, system_prompt=self._config.system_prompt))
+        response_text = extract_message_text(response)
+        if not response_text:
+            raise ValueError("LLM 未返回可展示文本")
+        return response_text
 
-    def _generate_with_chat(self, messages: Sequence[LLMMessage]) -> str:
-        chat_messages: list[dict[str, str]] = []
-        if self._config.system_prompt:
-            chat_messages.append({"role": "system", "content": self._config.system_prompt})
-        chat_messages.extend({"role": message.role, "content": message.content} for message in messages)
 
-        request_body: dict[str, Any] = {
-            "model": self._config.model,
-            "messages": chat_messages,
+def build_langchain_chat_model(config: LLMConfig) -> Any:
+    """根据项目 LLM 配置构造 LangChain ChatOpenAI。"""
+
+    try:
+        from langchain_openai import ChatOpenAI
+
+        kwargs: dict[str, Any] = {
+            "model": config.model,
+            "api_key": config.api_key,
+            "timeout": config.timeout_seconds,
         }
-        _apply_optional_generation_options(request_body, self._config)
+        if config.base_url is not None:
+            kwargs["base_url"] = config.base_url
+        if config.temperature is not None:
+            kwargs["temperature"] = config.temperature
+        if config.max_output_tokens is not None:
+            kwargs["model_kwargs"] = {"max_completion_tokens": config.max_output_tokens}
+        return ChatOpenAI(**kwargs)
+    except Exception as error:
+        raise LLMConfigurationError(f"LangChain ChatOpenAI 初始化失败：{error}") from error
 
-        completion = self._client.chat.completions.create(**request_body)
-        for choice in completion.choices:
-            content = choice.message.content
-            if isinstance(content, str) and content.strip():
-                return content.strip()
-        raise LLMResponseError("LLM 未返回可展示文本")
 
+def normalize_messages(messages: Sequence[LLMMessage]) -> list[LLMMessage]:
+    """裁剪消息内容并拒绝空消息。"""
 
-def _normalize_messages(messages: Sequence[LLMMessage]) -> list[LLMMessage]:
     normalized_messages: list[LLMMessage] = []
     for message in messages:
         content = message.content.strip()
         if not content:
-            raise LLMResponseError("消息内容不能为空")
+            raise ValueError("消息内容不能为空")
         normalized_messages.append(LLMMessage(role=message.role, content=content))
     return normalized_messages
 
 
-def _apply_optional_generation_options(
-    request_body: dict[str, Any],
-    config: LLMConfig,
-) -> None:
-    if config.temperature is not None:
-        request_body["temperature"] = config.temperature
-    if config.max_output_tokens is not None:
-        request_body["max_completion_tokens"] = config.max_output_tokens
+def to_langchain_messages(
+    messages: Sequence[LLMMessage],
+    *,
+    system_prompt: str | None = None,
+) -> list[tuple[str, str]]:
+    """转换为 LangChain ChatModel 可直接接收的消息格式。"""
+
+    langchain_messages: list[tuple[str, str]] = []
+    if system_prompt:
+        langchain_messages.append(("system", system_prompt))
+    langchain_messages.extend((message.role, message.content) for message in messages)
+    return langchain_messages
+
+
+def extract_message_text(response: object) -> str:
+    """从 LangChain AIMessage 或测试替身中提取文本。"""
+
+    text_value = getattr(response, "text", None)
+    if isinstance(text_value, str) and text_value.strip():
+        return text_value.strip()
+
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return _content_blocks_text(content)
+    return ""
+
+
+def _content_blocks_text(content_blocks: list[object]) -> str:
+    texts: list[str] = []
+    for content_block in content_blocks:
+        if isinstance(content_block, str):
+            texts.append(content_block)
+        elif isinstance(content_block, dict) and isinstance(content_block.get("text"), str):
+            texts.append(content_block["text"])
+    return "\n".join(text.strip() for text in texts if text.strip()).strip()
