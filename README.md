@@ -164,5 +164,18 @@ Web 后端提供 `/api/recall?q=PaymentService`，流程为：
 Web 图谱面板右下角的增量刷新按钮会调用 `/api/index/incremental`，等价于在当前仓库执行
 `rigel index --incremental`，成功后重新加载图谱并展示新增、修改、删除、跳过文件等统计。
 
+## Agent REST 工具接口
+
+Web 后端额外暴露一组只读 Agent 工具接口，供外部 Agent 复用同一份 `.rigel`
+索引产物。接口只返回结构化图谱证据与源码片段，不负责调用 Chat 模型生成回答。
+
+- `POST /api/agent/tools/semantic_recall`：输入 `query`、`limit`、`expansion_limit`，返回向量召回种子、摘要、相关一跳关系、源码文件、锚点和少量源码切片。
+- `POST /api/agent/tools/get_node_anchors`：输入 `node_id`，返回节点详情、所属源码文件与全部锚点坐标。
+- `POST /api/agent/tools/read_source_slice`：输入 `path`、`start_line`、`end_line`、可选 `max_lines`，读取已索引源码文件的安全行号切片。
+- `POST /api/agent/tools/expand_graph`：输入 `node_id`、`direction`、`edge_types`、`limit`，返回指定节点的一跳局部图关系。
+
+这些接口复用 CLI 写入的 `.rigel/rigel.json` 和 `.rigel/falkordb.db`，因此使用前仍需先执行
+`rigel init`、填写配置并完成 `rigel index`。
+
 Rigel 主仓库正式的架构决策与主线规划见：
 - GitHub: <https://github.com/FaulknerWu/Rigel>

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 from pathlib import Path
 from threading import Lock
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -21,14 +22,25 @@ from rigel_demo.cli import (
     index_repository_workspace,
     index_result_payload,
 )
+from rigel_demo.agent.service import (
+    DEFAULT_GRAPH_LIMIT,
+    DEFAULT_RECALL_EXPANSION_LIMIT,
+    DEFAULT_RECALL_LIMIT,
+    DEFAULT_SOURCE_SLICE_MAX_LINES,
+    VISIBLE_EDGE_TYPES,
+    GraphExpansionDirection,
+    RepositorySourceReader,
+    RigelGraphReader,
+    SourceFileNotFoundError,
+    SourceLineRangeError,
+    SourcePathError,
+    SourceReadError,
+)
 from rigel_demo.embedding import (
     EmbeddingConfig,
     EmbeddingRequestError,
     EmbeddingResponseError,
     RigelEmbedding,
-)
-from rigel_demo.indexing.retrieval_summaries import (
-    RETRIEVAL_SUMMARY_PURPOSE,
 )
 from rigel_demo.llm import (
     LLMConfig,
@@ -38,16 +50,13 @@ from rigel_demo.llm import (
     LLMResponseError,
     RigelLLM,
 )
-from rigel_demo.storage.falkordb_store import FalkorDBConfig, FalkorDBStore
 
-DEFAULT_GRAPH_LIMIT = 500
-DEFAULT_RECALL_LIMIT = 8
-DEFAULT_RECALL_EXPANSION_LIMIT = 3
 DEFAULT_CHAT_CONTEXT_LIMIT = 8
-DEFAULT_SOURCE_SLICE_MAX_LINES = 120
-DEFAULT_CONTEXT_SOURCE_SLICE_LIMIT = 1
-VISIBLE_NODE_TYPES = ("Repository", "Module", "File", "Entity")
-VISIBLE_EDGE_TYPES = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES")
+MAX_AGENT_RECALL_LIMIT = 20
+MAX_AGENT_EXPANSION_LIMIT = 10
+MAX_AGENT_SOURCE_SLICE_LINES = 300
+DEFAULT_AGENT_EXPAND_LIMIT = 20
+MAX_AGENT_EXPAND_LIMIT = 100
 
 
 def create_app(
@@ -200,6 +209,100 @@ def create_app(
             ),
         }
 
+    @app.post("/api/agent/tools/semantic_recall")
+    def agent_semantic_recall(request: AgentSemanticRecallRequest) -> dict[str, object]:
+        """Agent 工具：基于自然语言问题召回图谱证据上下文。"""
+
+        _ensure_database_exists(database_path)
+        query = request.query.strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="query 不能为空")
+        _ensure_agent_range(request.limit, "limit", minimum=1, maximum=MAX_AGENT_RECALL_LIMIT)
+        _ensure_agent_range(request.expansion_limit, "expansion_limit", minimum=0, maximum=MAX_AGENT_EXPANSION_LIMIT)
+        try:
+            query_embedding = active_embedding_client.embed_query(query)
+        except (EmbeddingRequestError, EmbeddingResponseError) as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+        return {
+            "status": "success",
+            "context": graph_reader.context(
+                query=query,
+                query_embedding=query_embedding,
+                embedding_model=active_embedding_client.config.model,
+                limit=request.limit,
+                expansion_limit=request.expansion_limit,
+                source_reader=source_reader,
+            ),
+        }
+
+    @app.post("/api/agent/tools/get_node_anchors")
+    def agent_get_node_anchors(request: AgentNodeAnchorsRequest) -> dict[str, object]:
+        """Agent 工具：读取指定图谱节点的源码锚点。"""
+
+        _ensure_database_exists(database_path)
+        result = graph_reader.anchors_for_node(request.node_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"未找到节点：{request.node_id}")
+        return {"status": "success", **result}
+
+    @app.post("/api/agent/tools/read_source_slice")
+    def agent_read_source_slice(request: AgentSourceSliceRequest) -> dict[str, object]:
+        """Agent 工具：读取已索引源码文件的安全行号切片。"""
+
+        _ensure_database_exists(database_path)
+        _ensure_agent_range(request.max_lines, "max_lines", minimum=1, maximum=MAX_AGENT_SOURCE_SLICE_LINES)
+        try:
+            normalized_path = source_reader.normalize_relative_path(request.path)
+        except SourcePathError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+        source_file = graph_reader.source_file(normalized_path)
+        if source_file is None:
+            raise HTTPException(status_code=404, detail=f"未找到已索引源码文件：{normalized_path}")
+
+        try:
+            source_slice = source_reader.read_slice(
+                normalized_path,
+                start_line=request.start_line,
+                end_line=request.end_line,
+                max_lines=request.max_lines,
+            )
+        except SourceLineRangeError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except SourceFileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except SourceReadError as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+        return {
+            "status": "success",
+            "source": {
+                **source_slice,
+                "source_file": source_file,
+            },
+        }
+
+    @app.post("/api/agent/tools/expand_graph")
+    def agent_expand_graph(request: AgentExpandGraphRequest) -> dict[str, object]:
+        """Agent 工具：读取指定节点的一跳局部图关系。"""
+
+        _ensure_database_exists(database_path)
+        _ensure_agent_range(request.limit, "limit", minimum=1, maximum=MAX_AGENT_EXPAND_LIMIT)
+        _ensure_agent_edge_types(request.edge_types)
+        if graph_reader.node_by_id(request.node_id) is None:
+            raise HTTPException(status_code=404, detail=f"未找到节点：{request.node_id}")
+
+        return {
+            "status": "success",
+            "graph": graph_reader.expand_graph(
+                node_id=request.node_id,
+                direction=request.direction,
+                edge_types=request.edge_types,
+                limit=request.limit,
+            ),
+        }
+
     @app.post("/api/index/incremental")
     def incremental_index() -> dict[str, object]:
         """执行演示级增量索引并更新当前图数据库。"""
@@ -274,419 +377,40 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessagePayload] = Field(min_length=1, max_length=50)
 
 
-class SourcePathError(ValueError):
-    """源码路径不在当前仓库内。"""
+class AgentSemanticRecallRequest(BaseModel):
+    """Agent 语义召回工具请求体。"""
+
+    query: str = Field(min_length=1)
+    limit: int = DEFAULT_RECALL_LIMIT
+    expansion_limit: int = DEFAULT_RECALL_EXPANSION_LIMIT
 
 
-class SourceLineRangeError(ValueError):
-    """源码切片行号范围不可用。"""
+class AgentNodeAnchorsRequest(BaseModel):
+    """Agent 节点锚点工具请求体。"""
+
+    node_id: str = Field(min_length=1)
 
 
-class SourceFileNotFoundError(FileNotFoundError):
-    """源码文件不存在。"""
+class AgentSourceSliceRequest(BaseModel):
+    """Agent 源码切片工具请求体。"""
+
+    path: str = Field(min_length=1)
+    start_line: int
+    end_line: int
+    max_lines: int = DEFAULT_SOURCE_SLICE_MAX_LINES
 
 
-class SourceReadError(RuntimeError):
-    """源码文件读取失败。"""
+class AgentExpandGraphRequest(BaseModel):
+    """Agent 局部图扩展工具请求体。"""
 
-
-class RepositorySourceReader:
-    """从当前仓库安全读取源码切片。"""
-
-    def __init__(self, repository_path: Path) -> None:
-        self._repository_path = repository_path.resolve()
-
-    def normalize_relative_path(self, relative_path: str) -> str:
-        candidate_path = self._resolve_repository_file(relative_path)
-        try:
-            return candidate_path.relative_to(self._repository_path).as_posix()
-        except ValueError as error:
-            raise SourcePathError("源码路径必须位于当前仓库内") from error
-
-    def read_slice(
-        self,
-        relative_path: str,
-        *,
-        start_line: int,
-        end_line: int,
-        max_lines: int = DEFAULT_SOURCE_SLICE_MAX_LINES,
-    ) -> dict[str, object]:
-        normalized_path = self.normalize_relative_path(relative_path)
-        if start_line < 1:
-            raise SourceLineRangeError("start_line 必须大于 0")
-        if end_line < start_line:
-            raise SourceLineRangeError("end_line 必须大于或等于 start_line")
-
-        bounded_end_line = min(end_line, start_line + max_lines - 1)
-        file_path = self._repository_path / normalized_path
-        if not file_path.exists() or not file_path.is_file():
-            raise SourceFileNotFoundError(f"未找到源码文件：{normalized_path}")
-
-        try:
-            lines = file_path.read_text(encoding="utf-8").splitlines()
-        except UnicodeDecodeError as error:
-            raise SourceReadError(f"源码文件不是 UTF-8 文本：{normalized_path}") from error
-        except OSError as error:
-            raise SourceReadError(f"读取源码文件失败：{normalized_path}") from error
-
-        total_lines = len(lines)
-        if start_line > total_lines:
-            raise SourceLineRangeError(f"start_line 超出文件总行数：{total_lines}")
-
-        actual_end_line = min(bounded_end_line, total_lines)
-        selected_lines = lines[start_line - 1 : actual_end_line]
-        return {
-            "relative_path": normalized_path,
-            "start_line": start_line,
-            "end_line": actual_end_line,
-            "requested_end_line": end_line,
-            "truncated": actual_end_line < end_line,
-            "total_lines": total_lines,
-            "content": "\n".join(selected_lines),
-        }
-
-    def _resolve_repository_file(self, relative_path: str) -> Path:
-        if not relative_path.strip():
-            raise SourcePathError("源码路径不能为空")
-        raw_path = Path(relative_path)
-        if raw_path.is_absolute():
-            candidate_path = raw_path.resolve()
-        else:
-            candidate_path = (self._repository_path / raw_path).resolve()
-        try:
-            candidate_path.relative_to(self._repository_path)
-        except ValueError as error:
-            raise SourcePathError("源码路径必须位于当前仓库内") from error
-        return candidate_path
-
-
-class RigelGraphReader:
-    """读取 FalkorDBLite 中的 Rigel 图谱演示数据。"""
-
-    def __init__(self, *, database_path: Path, graph_name: str) -> None:
-        self._database_path = database_path
-        self._graph_name = graph_name
-
-    def summary(self) -> dict[str, object]:
-        """统计默认可视化语义图谱的节点、边与节点类型分布。"""
-
-        node_count = self._scalar_query(
-            """
-            MATCH (node:RigelNode)
-            WHERE node.rigel_type IN $visible_node_types
-            RETURN count(node)
-            """,
-            {"visible_node_types": list(VISIBLE_NODE_TYPES)},
-        )
-        edge_count = self._scalar_query(
-            """
-            MATCH (source:RigelNode)-[edge]->(target:RigelNode)
-            WHERE source.rigel_type IN $visible_node_types
-              AND target.rigel_type IN $visible_node_types
-              AND type(edge) IN $visible_edge_types
-            RETURN count(edge)
-            """,
-            {
-                "visible_node_types": list(VISIBLE_NODE_TYPES),
-                "visible_edge_types": list(VISIBLE_EDGE_TYPES),
-            },
-        )
-        type_rows = self._query(
-            """
-            MATCH (node:RigelNode)
-            WHERE node.rigel_type IN $visible_node_types
-            RETURN node.rigel_type, count(node)
-            ORDER BY count(node) DESC
-            """,
-            {"visible_node_types": list(VISIBLE_NODE_TYPES)},
-        )
-        return {
-            "node_count": node_count,
-            "edge_count": edge_count,
-            "node_types": [
-                {"type": node_type, "count": count}
-                for node_type, count in type_rows
-            ],
-        }
-
-    def graph(self, *, limit: int) -> dict[str, list[dict[str, object]]]:
-        """读取默认可视化语义节点和这些节点之间的语义边。"""
-
-        node_rows = self._query(
-            """
-            MATCH (node:RigelNode)
-            WHERE node.rigel_type IN $visible_node_types
-            RETURN node.id, properties(node)
-            LIMIT $limit
-            """,
-            {"visible_node_types": list(VISIBLE_NODE_TYPES), "limit": limit},
-        )
-        nodes = [_format_node(node_id, properties) for node_id, properties in node_rows]
-        node_ids = [str(node["id"]) for node in nodes]
-        if not node_ids:
-            return {"nodes": [], "edges": []}
-
-        # 边只返回当前节点窗口内部的关系，避免前端收到指向缺失节点的悬空连线。
-        edge_rows = self._query(
-            """
-            MATCH (source:RigelNode)-[edge]->(target:RigelNode)
-            WHERE source.id IN $node_ids AND target.id IN $node_ids
-              AND type(edge) IN $visible_edge_types
-            RETURN source.id, target.id, type(edge), properties(edge)
-            LIMIT $limit
-            """,
-            {
-                "node_ids": node_ids,
-                "visible_edge_types": list(VISIBLE_EDGE_TYPES),
-                "limit": limit * 2,
-            },
-        )
-        edges = [_format_edge(source_id, target_id, edge_type, properties) for source_id, target_id, edge_type, properties in edge_rows]
-        return {"nodes": nodes, "edges": edges}
-
-    def recall(
-        self,
-        query_embedding: list[float],
-        *,
-        embedding_model: str,
-        limit: int,
-        expansion_limit: int,
-    ) -> list[dict[str, object]]:
-        """通过 Summary embedding 召回种子节点并补充一跳图谱上下文。"""
-
-        rows = self._query(
-            """
-            CALL db.idx.vector.queryNodes('Summary', 'embedding', $vector_limit, vecf32($query_embedding))
-            YIELD node AS summary, score AS distance
-            MATCH (summary)-[:DESCRIBES]->(target:RigelNode)
-            WHERE summary.purpose = $purpose
-              AND summary.embedding_model = $embedding_model
-              AND summary.embedding_dimensions = $embedding_dimensions
-              AND target.rigel_type IN $visible_node_types
-            RETURN summary.id, properties(summary), target.id, properties(target), distance
-            ORDER BY distance ASC
-            """,
-            {
-                "purpose": RETRIEVAL_SUMMARY_PURPOSE,
-                "embedding_model": embedding_model,
-                "embedding_dimensions": len(query_embedding),
-                "visible_node_types": list(VISIBLE_NODE_TYPES),
-                "query_embedding": query_embedding,
-                "vector_limit": limit,
-            },
-        )
-        scored_results: list[dict[str, object]] = []
-        for summary_id, summary_properties, target_id, target_properties, distance in rows:
-            score = _cosine_distance_to_similarity(distance)
-            if score <= 0:
-                continue
-            node = _format_node(target_id, target_properties)
-            scored_results.append(
-                {
-                    "score": score,
-                    "summary": _format_summary(summary_id, summary_properties),
-                    "node": node,
-                    "related": self._related_nodes(str(target_id), limit=expansion_limit),
-                }
-            )
-
-        scored_results.sort(
-            key=lambda result: (
-                -cast(float, result["score"]),
-                str(cast(Mapping[str, object], result["node"])["label"]),
-            )
-        )
-        return scored_results[:limit]
-
-    def context(
-        self,
-        *,
-        query: str,
-        query_embedding: list[float],
-        embedding_model: str,
-        limit: int,
-        expansion_limit: int,
-        source_reader: RepositorySourceReader,
-    ) -> dict[str, object]:
-        """组装 Agent 可直接引用的结构化图谱上下文。"""
-
-        recall_results = self.recall(
-            query_embedding,
-            embedding_model=embedding_model,
-            limit=limit,
-            expansion_limit=expansion_limit,
-        )
-        return {
-            "query": query,
-            "strategy": "vector_recall",
-            "seeds": [
-                self._context_seed_from_recall_result(index, result, source_reader=source_reader)
-                for index, result in enumerate(recall_results, start=1)
-            ],
-        }
-
-    def anchors_for_node(self, node_id: str) -> dict[str, object] | None:
-        """返回节点和它的源码锚点；节点不存在时返回 None。"""
-
-        node = self._node_by_id(node_id)
-        if node is None:
-            return None
-        source_file = self._source_file_for_node(node_id)
-        return {
-            "node": node,
-            "source_file": source_file,
-            "anchors": self._anchors_for_node(node_id, source_file=source_file),
-        }
-
-    def source_file(self, relative_path: str) -> dict[str, object] | None:
-        rows = self._query(
-            """
-            MATCH (node:RigelNode:File)
-            WHERE node.relative_path = $relative_path
-            RETURN node.id, properties(node)
-            LIMIT 1
-            """,
-            {"relative_path": relative_path},
-        )
-        if not rows:
-            return None
-        return _format_source_file(_format_node(rows[0][0], rows[0][1]))
-
-    def _related_nodes(self, node_id: str, *, limit: int) -> list[dict[str, object]]:
-        rows = self._query(
-            """
-            MATCH (source:RigelNode)-[edge]->(target:RigelNode)
-            WHERE (source.id = $node_id OR target.id = $node_id)
-              AND source.rigel_type IN $visible_node_types
-              AND target.rigel_type IN $visible_node_types
-              AND type(edge) IN $visible_edge_types
-            RETURN source.id, properties(source), target.id, properties(target), type(edge), properties(edge)
-            LIMIT $limit
-            """,
-            {
-                "node_id": node_id,
-                "visible_node_types": list(VISIBLE_NODE_TYPES),
-                "visible_edge_types": list(VISIBLE_EDGE_TYPES),
-                "limit": limit,
-            },
-        )
-
-        related_nodes: list[dict[str, object]] = []
-        for source_id, source_properties, target_id, target_properties, edge_type, edge_properties in rows:
-            source_node = _format_node(source_id, source_properties)
-            target_node = _format_node(target_id, target_properties)
-            related_node = target_node if str(source_id) == node_id else source_node
-            related_nodes.append(
-                {
-                    "direction": "outgoing" if str(source_id) == node_id else "incoming",
-                    "edge": _format_edge(source_id, target_id, edge_type, edge_properties),
-                    "node": related_node,
-                }
-            )
-        return related_nodes
-
-    def _context_seed_from_recall_result(
-        self,
-        rank: int,
-        result: dict[str, object],
-        *,
-        source_reader: RepositorySourceReader,
-    ) -> dict[str, object]:
-        node = cast(dict[str, object], result["node"])
-        node_id = str(node["id"])
-        source_file = self._source_file_for_node(node_id)
-        anchors = self._anchors_for_node(node_id, source_file=source_file)
-        return {
-            "rank": rank,
-            "score": result["score"],
-            "summary": result["summary"],
-            "node": node,
-            "related": result["related"],
-            "source_file": source_file,
-            "anchors": anchors,
-            "source_slices": _source_slices_for_anchors(anchors, source_reader=source_reader),
-        }
-
-    def _anchors_for_node(
-        self,
-        node_id: str,
-        *,
-        source_file: dict[str, object] | None,
-    ) -> list[dict[str, object]]:
-        rows = self._query(
-            """
-            MATCH (owner:RigelNode)-[edge:HAS_ANCHOR]->(anchor:RigelNode:Anchor)
-            WHERE owner.id = $node_id
-            RETURN anchor.id, properties(anchor), properties(edge)
-            """,
-            {"node_id": node_id},
-        )
-        anchors = [
-            _format_anchor(anchor_id, anchor_properties, edge_properties, source_file)
-            for anchor_id, anchor_properties, edge_properties in rows
-        ]
-        anchors.sort(key=_anchor_sort_key)
-        return anchors
-
-    def _source_file_for_node(self, node_id: str) -> dict[str, object] | None:
-        current_node_id: str | None = node_id
-        visited_node_ids: set[str] = set()
-        while current_node_id and current_node_id not in visited_node_ids:
-            visited_node_ids.add(current_node_id)
-            node = self._node_by_id(current_node_id)
-            if node is None:
-                return None
-            if node["type"] == "File":
-                return _format_source_file(node)
-            current_node_id = self._parent_node_id(current_node_id)
-        return None
-
-    def _node_by_id(self, node_id: str) -> dict[str, object] | None:
-        rows = self._query(
-            """
-            MATCH (node:RigelNode)
-            WHERE node.id = $node_id
-            RETURN node.id, properties(node)
-            LIMIT 1
-            """,
-            {"node_id": node_id},
-        )
-        if not rows:
-            return None
-        return _format_node(rows[0][0], rows[0][1])
-
-    def _parent_node_id(self, node_id: str) -> str | None:
-        rows = self._query(
-            """
-            MATCH (parent:RigelNode)-[:CONTAINS]->(child:RigelNode)
-            WHERE child.id = $node_id
-            RETURN parent.id
-            LIMIT 1
-            """,
-            {"node_id": node_id},
-        )
-        if not rows:
-            return None
-        return str(rows[0][0])
-
-    def _scalar_query(self, query: str, parameters: Mapping[str, object]) -> int:
-        rows = self._query(query, parameters)
-        if not rows:
-            return 0
-        return int(rows[0][0])
-
-    def _query(self, query: str, parameters: Mapping[str, object]) -> list[list[Any]]:
-        store = FalkorDBStore.connect(
-            FalkorDBConfig(graph_name=self._graph_name, database_path=str(self._database_path))
-        )
-        result = store.graph.query(query, dict(parameters))
-        return list(result.result_set)
+    node_id: str = Field(min_length=1)
+    direction: GraphExpansionDirection = "both"
+    edge_types: list[str] = Field(default_factory=lambda: list(VISIBLE_EDGE_TYPES))
+    limit: int = DEFAULT_AGENT_EXPAND_LIMIT
 
 
 def _read_graph_name(state_path: Path) -> str:
     """读取索引状态中的图名称。"""
-
-    import json
 
     return cast(str, json.loads(state_path.read_text(encoding="utf-8"))["graph_name"])
 
@@ -699,6 +423,21 @@ def _ensure_database_exists(database_path: Path) -> None:
             status_code=404,
             detail=f"未找到数据库文件，请先在目标仓库执行 rigel index: {database_path}",
         )
+
+
+def _ensure_agent_range(value: int, name: str, *, minimum: int, maximum: int) -> None:
+    """校验 Agent 工具数值参数，保持工具错误统一返回 400。"""
+
+    if isinstance(value, bool) or value < minimum or value > maximum:
+        raise HTTPException(status_code=400, detail=f"{name} 必须在 {minimum} 到 {maximum} 之间")
+
+
+def _ensure_agent_edge_types(edge_types: list[str]) -> None:
+    """校验 Agent 局部图扩展的边类型。"""
+
+    invalid_edge_types = [edge_type for edge_type in edge_types if edge_type not in VISIBLE_EDGE_TYPES]
+    if invalid_edge_types:
+        raise HTTPException(status_code=400, detail=f"不支持的 edge_types：{', '.join(invalid_edge_types)}")
 
 
 def _resolve_chat_client(repository_path: Path, provided_client: RigelLLM | None) -> RigelLLM:
@@ -799,149 +538,3 @@ def _format_recall_context(recall_results: list[dict[str, object]]) -> str:
                 f"   - {related['direction']} {edge['type']} {related_node['label']}（{related_node['type']}）"
             )
     return "\n".join(lines)
-
-
-def _read_property(properties: Mapping[str, object], name: str) -> str:
-    value = properties.get(name)
-    return value if isinstance(value, str) else ""
-
-
-def _format_node(node_id: str, properties: Mapping[str, object]) -> dict[str, object]:
-    formatted_properties = dict(properties)
-    return {
-        "id": node_id,
-        "type": str(formatted_properties["rigel_type"]),
-        "label": _node_label(node_id, formatted_properties),
-        "properties": formatted_properties,
-    }
-
-
-def _format_edge(
-    source_id: str,
-    target_id: str,
-    edge_type: str,
-    properties: Mapping[str, object],
-) -> dict[str, object]:
-    formatted_properties = dict(properties)
-    return {
-        "id": str(formatted_properties["id"]),
-        "source": source_id,
-        "target": target_id,
-        "type": edge_type,
-        "properties": formatted_properties,
-    }
-
-
-def _format_summary(summary_id: str, properties: Mapping[str, object]) -> dict[str, object]:
-    return {
-        "id": summary_id,
-        "text": _read_property(properties, "text"),
-        "summary_model": _read_property(properties, "summary_model"),
-        "embedding_model": _read_property(properties, "embedding_model"),
-        "embedding_dimensions": _read_int_property(properties, "embedding_dimensions"),
-        "source_hash": _read_property(properties, "source_hash"),
-    }
-
-
-def _format_anchor(
-    anchor_id: str,
-    anchor_properties: Mapping[str, object],
-    edge_properties: Mapping[str, object],
-    source_file: dict[str, object] | None,
-) -> dict[str, object]:
-    role = _read_property(edge_properties, "role") or _read_property(anchor_properties, "role")
-    return {
-        "id": anchor_id,
-        "role": role,
-        "start_line": _read_int_property(anchor_properties, "start_line"),
-        "start_col": _read_int_property(anchor_properties, "start_col"),
-        "end_line": _read_int_property(anchor_properties, "end_line"),
-        "end_col": _read_int_property(anchor_properties, "end_col"),
-        "source_file": source_file,
-        "properties": dict(anchor_properties),
-    }
-
-
-def _format_source_file(file_node: Mapping[str, object]) -> dict[str, object]:
-    properties = cast(Mapping[str, object], file_node["properties"])
-    return {
-        "id": file_node["id"],
-        "label": file_node["label"],
-        "relative_path": _read_property(properties, "relative_path"),
-        "language": _read_property(properties, "language"),
-        "content_hash": _read_property(properties, "content_hash"),
-        "position_encoding": _read_property(properties, "position_encoding"),
-    }
-
-
-def _source_slices_for_anchors(
-    anchors: list[dict[str, object]],
-    *,
-    source_reader: RepositorySourceReader,
-) -> list[dict[str, object]]:
-    source_slices: list[dict[str, object]] = []
-    for anchor in anchors[:DEFAULT_CONTEXT_SOURCE_SLICE_LIMIT]:
-        source_file = anchor.get("source_file")
-        if not isinstance(source_file, dict):
-            continue
-        relative_path = _read_property(source_file, "relative_path")
-        if not relative_path:
-            continue
-        try:
-            source_slice = source_reader.read_slice(
-                relative_path,
-                start_line=int(anchor["start_line"]),
-                end_line=int(anchor["end_line"]),
-            )
-        except (SourcePathError, SourceLineRangeError, SourceFileNotFoundError, SourceReadError):
-            continue
-        source_slices.append(
-            {
-                **source_slice,
-                "anchor": {
-                    "id": anchor["id"],
-                    "role": anchor["role"],
-                    "start_line": anchor["start_line"],
-                    "start_col": anchor["start_col"],
-                    "end_line": anchor["end_line"],
-                    "end_col": anchor["end_col"],
-                },
-                "source_file": source_file,
-            }
-        )
-    return source_slices
-
-
-def _anchor_sort_key(anchor: Mapping[str, object]) -> tuple[int, int, str]:
-    return (
-        _anchor_role_priority(str(anchor["role"])),
-        int(anchor["start_line"]),
-        str(anchor["id"]),
-    )
-
-
-def _anchor_role_priority(role: str) -> int:
-    priorities = {
-        "definition": 0,
-        "body": 1,
-    }
-    return priorities.get(role, 99)
-
-
-def _read_int_property(properties: Mapping[str, object], name: str) -> int:
-    value = properties.get(name)
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
-def _cosine_distance_to_similarity(distance: object) -> float:
-    if isinstance(distance, bool) or not isinstance(distance, int | float):
-        return 0.0
-    return max(0.0, 1.0 - float(distance))
-
-
-def _node_label(node_id: str, properties: Mapping[str, object]) -> str:
-    for key in ("display_name", "qualified_name", "relative_path", "name"):
-        value = properties.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return node_id

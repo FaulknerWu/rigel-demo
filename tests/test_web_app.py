@@ -142,6 +142,139 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(context["strategy"], "vector_recall")
         self.assertEqual(context["seeds"], [])
 
+    def test_agent_semantic_recall_returns_structured_context(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
+
+            response = client.post(
+                "/api/agent/tools/semantic_recall",
+                json={"query": "PaymentService", "limit": 3, "expansion_limit": 2},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        context = response.json()["context"]
+        self.assertEqual(context["query"], "PaymentService")
+        self.assertEqual(context["strategy"], "vector_recall")
+        seed = context["seeds"][0]
+        self.assertEqual(seed["node"]["label"], "PaymentService")
+        self.assertEqual(seed["anchors"][0]["role"], "definition")
+        self.assertIn("class PaymentService", seed["source_slices"][0]["content"])
+
+    def test_agent_semantic_recall_rejects_invalid_limit(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
+
+            response = client.post(
+                "/api/agent/tools/semantic_recall",
+                json={"query": "PaymentService", "limit": 21},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("limit", response.json()["detail"])
+
+    def test_agent_get_node_anchors_returns_source_file_and_coordinates(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
+
+            response = client.post(
+                "/api/agent/tools/get_node_anchors",
+                json={"node_id": "entity:demo:PaymentService"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["node"]["label"], "PaymentService")
+        self.assertEqual(payload["source_file"]["relative_path"], "src/main/java/demo/PaymentService.java")
+        self.assertEqual([anchor["role"] for anchor in payload["anchors"]], ["definition", "body"])
+
+    def test_agent_read_source_slice_truncates_by_max_lines(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
+
+            response = client.post(
+                "/api/agent/tools/read_source_slice",
+                json={
+                    "path": "src/main/java/demo/PaymentService.java",
+                    "start_line": 3,
+                    "end_line": 8,
+                    "max_lines": 2,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        source = response.json()["source"]
+        self.assertEqual(source["source_file"]["relative_path"], "src/main/java/demo/PaymentService.java")
+        self.assertEqual(source["start_line"], 3)
+        self.assertEqual(source["end_line"], 4)
+        self.assertTrue(source["truncated"])
+        self.assertIn("class PaymentService", source["content"])
+
+    def test_agent_read_source_slice_rejects_path_outside_repository(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
+
+            response = client.post(
+                "/api/agent/tools/read_source_slice",
+                json={"path": "../secret.java", "start_line": 1, "end_line": 1},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("当前仓库内", response.json()["detail"])
+
+    def test_agent_expand_graph_returns_filtered_incoming_relations(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
+
+            response = client.post(
+                "/api/agent/tools/expand_graph",
+                json={
+                    "node_id": "entity:demo:PaymentService",
+                    "direction": "incoming",
+                    "edge_types": ["CONTAINS"],
+                    "limit": 5,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        graph = response.json()["graph"]
+        self.assertEqual(graph["node_id"], "entity:demo:PaymentService")
+        self.assertEqual(graph["relations"][0]["direction"], "incoming")
+        self.assertEqual(graph["relations"][0]["edge"]["type"], "CONTAINS")
+        self.assertEqual(graph["relations"][0]["node"]["type"], "File")
+
+    def test_agent_expand_graph_returns_404_for_unknown_node(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
+
+            response = client.post(
+                "/api/agent/tools/expand_graph",
+                json={"node_id": "entity:demo:Missing"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("未找到节点", response.json()["detail"])
+
     def test_node_anchors_returns_source_file_and_anchor_coordinates(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
