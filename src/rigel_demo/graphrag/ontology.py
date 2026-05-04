@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from rigel_demo.graphrag.config import GraphRAGConfig
+from rigel_demo.config import GraphRAGConfig
 
 
 def build_rigel_ontology(*, config: GraphRAGConfig, graph_name: str) -> Any:

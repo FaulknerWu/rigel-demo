@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from rigel_demo.graphrag.config import GraphRAGConfig
+from rigel_demo.config import GraphRAGConfig
 from rigel_demo.graphrag.ontology import build_rigel_ontology
 from rigel_demo.graphrag.prompts import (
     RIGEL_CYPHER_GENERATION_PROMPT,

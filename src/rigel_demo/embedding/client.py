@@ -7,7 +7,7 @@ from typing import Any
 
 from openai import DefaultHttpxClient, OpenAI, OpenAIError
 
-from rigel_demo.embedding.config import (
+from rigel_demo.config import (
     EmbeddingConfig,
     EmbeddingConfigurationError,
     EmbeddingFormat,

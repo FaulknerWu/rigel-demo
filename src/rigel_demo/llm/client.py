@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from openai import DefaultHttpxClient, OpenAI, OpenAIError
 
-from rigel_demo.llm.config import LLMConfig, LLMConfigurationError
+from rigel_demo.config import LLMConfig, LLMConfigurationError
 
 
 MessageRole = Literal["user", "assistant"]

@@ -1,5 +1,6 @@
 """GraphRAG-SDK ontology、prompts 与 chat service。"""
 
+from rigel_demo.config import GraphRAGConfig, GraphRAGConfigurationError
 from rigel_demo.graphrag.chat import (
     GraphRAGReply,
     GraphRAGSDKChatService,
@@ -8,7 +9,6 @@ from rigel_demo.graphrag.chat import (
     RigelGraphRAGError,
     build_graphrag_chat_service,
 )
-from rigel_demo.graphrag.config import GraphRAGConfig, GraphRAGConfigurationError
 from rigel_demo.graphrag.ontology import build_rigel_ontology
 
 __all__ = [

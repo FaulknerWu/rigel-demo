@@ -17,7 +17,7 @@ from rigel_demo.graphrag.chat import (
     _restore_litellm_environment,
     _start_embedded_falkordb_runtime,
 )
-from rigel_demo.graphrag.config import GraphRAGConfig
+from rigel_demo.config import GraphRAGConfig
 from rigel_demo.llm import LLMConfig, LLMMessage
 
 

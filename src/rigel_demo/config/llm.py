@@ -7,7 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from rigel_demo.config_document import ConfigDocumentErrorMessages, ConfigFieldReader, read_config_document
+from rigel_demo.config.document import ConfigDocumentErrorMessages, ConfigFieldReader, read_config_document
 
 DEFAULT_CHAT_SYSTEM_PROMPT = (
     "你是 Rigel 的代码图谱分析助手。回答时优先基于用户给出的代码图谱、仓库上下文与当前问题，"

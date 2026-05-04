@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rigel_demo.config_document import ConfigDocumentErrorMessages, ConfigFieldReader, read_config_document
+from rigel_demo.config.document import ConfigDocumentErrorMessages, ConfigFieldReader, read_config_document
 
 GRAPHRAG_CONFIG_SECTION_NAME = "graphrag"
 

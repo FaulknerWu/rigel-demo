@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rigel_demo.config_document import ConfigDocumentErrorMessages, read_config_document
-from rigel_demo.llm.config import DEFAULT_CHAT_SYSTEM_PROMPT, DEFAULT_SUMMARY_SYSTEM_PROMPT
+from rigel_demo.config.document import ConfigDocumentErrorMessages, read_config_document
+from rigel_demo.config.llm import DEFAULT_CHAT_SYSTEM_PROMPT, DEFAULT_SUMMARY_SYSTEM_PROMPT
 
 WEB_CONFIG_SECTION_NAME = "web"
 DEFAULT_CONFIG_DOCUMENT = {
