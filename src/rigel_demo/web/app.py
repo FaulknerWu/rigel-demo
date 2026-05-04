@@ -62,6 +62,7 @@ def create_app(
         chat_client,
         graph_name=graph_name,
         database_path=database_path,
+        embedding_client=active_embedding_client,
     )
     incremental_index_lock = Lock()
 
@@ -227,6 +228,7 @@ def _resolve_chat_client(
     *,
     graph_name: str,
     database_path: Path,
+    embedding_client: RigelEmbedding,
 ) -> RigelChatService:
     if provided_client is not None:
         return provided_client
@@ -235,6 +237,7 @@ def _resolve_chat_client(
         repository_path=repository_path,
         graph_name=graph_name,
         database_path=database_path,
+        embedding_client=embedding_client,
     )
 
 

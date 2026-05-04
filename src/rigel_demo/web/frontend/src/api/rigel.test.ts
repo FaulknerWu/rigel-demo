@@ -102,8 +102,8 @@ assert.equal(indexResult.graphEdgeCount, 24);
 const chatResponse: ApiChatResponse = {
   status: 'success',
   message: { role: 'assistant', content: 'PaymentService 处理付款流程' },
-  queries: [{ name: 'cypher', args: { query: 'MATCH (entity:Entity) RETURN entity' } }],
+  queries: [{ name: 'vector_search_seeds', args: { query_text: 'PaymentService' } }],
   model: 'gpt-5.2',
   provider: 'openai',
 };
-assert.equal(chatResponse.queries[0].name, 'cypher');
+assert.equal(chatResponse.queries[0].name, 'vector_search_seeds');

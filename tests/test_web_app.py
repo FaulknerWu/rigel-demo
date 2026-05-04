@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from rigel_demo.entities import Anchor, Entity, File, Module, Repository
 from rigel_demo.graph import EdgeType, GraphEdge, GraphIR
 from rigel_demo.embedding import EmbeddingConfig, EmbeddingConfigurationError, EmbeddingFormat, EmbeddingInputMode
-from rigel_demo.project.summaries import attach_retrieval_summaries, build_retrieval_summary
+from rigel_demo.project.summaries import attach_retrieval_summaries
 from rigel_demo.llm import (
     DEFAULT_CHAT_SYSTEM_PROMPT,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
@@ -132,10 +132,10 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["message"], {"role": "assistant", "content": "测试回复"})
-        self.assertEqual(payload["queries"], [{"name": "cypher", "args": {"query": "MATCH (n) RETURN n"}}])
+        self.assertEqual(payload["queries"], [{"name": "vector_search_seeds", "args": {"query_text": "PaymentService"}}])
         self.assertEqual(fake_chat.messages[0], LLMMessage(role="user", content="PaymentService 做什么"))
 
-    def test_recall_uses_falkordb_vector_index(self) -> None:
+    def test_summary_vector_index_supports_chat_seed_search(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
@@ -304,80 +304,16 @@ class WebAppLLMTest(TestCase):
         anchors = anchor_payload["anchors"]
         self.assertEqual([anchor["role"] for anchor in anchors], ["definition", "body", "extra"])
 
-    def test_context_skips_source_slices_for_anchor_without_source_file(self) -> None:
-        fake_embedding = _FakeEmbeddingClient()
-        with TemporaryDirectory() as workspace:
-            repository_path = Path(workspace)
-            database_path = _write_demo_graph(repository_path, fake_embedding)
-            orphan_entity = Entity(
-                entity_id="entity:demo:DetachedService",
-                entity_key="java:demo.DetachedService",
-                display_name="DetachedService",
-                qualified_name="demo.DetachedService",
-                kind_norm="class",
-                kind_raw="class_declaration",
-                origin="internal",
-                semantic_hash="sha256:detached-service",
-            )
-            orphan_anchor = Anchor(
-                anchor_id="anchor:entity:demo:DetachedService:definition",
-                start_line=1,
-                start_col=1,
-                end_line=1,
-                end_col=10,
-                role="definition",
-            )
-            orphan_summary = build_retrieval_summary(
-                orphan_entity.to_node(),
-                text="PaymentService detached evidence",
-                summary_model="summary-model",
-                embedding_model=fake_embedding.config.model,
-                embedding=[1.0, 0.0, 0.0],
-            )
-            with FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))) as store:
-                store.upsert_graph(
-                    GraphIR(
-                        nodes=[orphan_entity.to_node(), orphan_anchor.to_node(), orphan_summary.to_node()],
-                        edges=[
-                            GraphEdge.create(
-                                EdgeType.HAS_ANCHOR,
-                                orphan_entity.entity_id,
-                                orphan_anchor.anchor_id,
-                                role="definition",
-                            ),
-                            GraphEdge.create(
-                                EdgeType.DESCRIBES,
-                                orphan_summary.summary_id,
-                                orphan_entity.entity_id,
-                                kind="retrieval-summary",
-                            ),
-                        ],
-                    )
-                )
-            with RigelGraphReader(database_path=database_path, graph_name="rigel") as graph_reader:
-                context = graph_reader.context(
-                    query="PaymentService",
-                    query_embedding=[1.0, 0.0, 0.0],
-                    embedding_model=fake_embedding.config.model,
-                    limit=10,
-                    expansion_limit=1,
-                    source_reader=RepositorySourceReader(repository_path),
-                )
-
-        orphan_seed = next(seed for seed in context["seeds"] if seed["node"]["id"] == orphan_entity.entity_id)
-        self.assertIsNone(orphan_seed["source_file"])
-        self.assertEqual(orphan_seed["source_slices"], [])
-
     def test_chat_returns_graphrag_query_trace_when_graph_exists(self) -> None:
         fake_chat = _FakeGraphRAGChat(
             GraphRAGReply(
                 content="PaymentService 处理付款流程",
                 traces=[
-                    GraphRAGTrace(name="cypher", args={"query": "MATCH (entity:Entity) RETURN entity"}),
                     GraphRAGTrace(
-                        name="context",
+                        name="vector_search_seeds",
                         args={
-                            "items": 2,
+                            "query_text": "PaymentService",
+                            "items": [],
                         },
                     ),
                 ],
@@ -394,7 +330,7 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["message"]["content"], "PaymentService 处理付款流程")
-        self.assertEqual([query["name"] for query in payload["queries"]], ["cypher", "context"])
+        self.assertEqual([query["name"] for query in payload["queries"]], ["vector_search_seeds"])
 
     def test_chat_keeps_raw_messages_for_graphrag(self) -> None:
         fake_chat = _FakeGraphRAGChat(GraphRAGReply(content="没有找到确定证据", traces=[]))
@@ -668,7 +604,7 @@ class _FakeGraphRAGChat:
         self.messages: list[LLMMessage] = []
         self.reply = reply or GraphRAGReply(
             content="测试回复",
-            traces=[GraphRAGTrace(name="cypher", args={"query": "MATCH (n) RETURN n"})],
+            traces=[GraphRAGTrace(name="vector_search_seeds", args={"query_text": "PaymentService"})],
         )
 
     def send_messages(self, messages: list[LLMMessage]) -> GraphRAGReply:

@@ -8,25 +8,30 @@ from unittest import TestCase
 from falkordb import FalkorDB
 
 from rigel_demo.config import GraphRAGConfig
+from rigel_demo.embedding import EmbeddingConfig, EmbeddingFormat, EmbeddingInputMode
 from rigel_demo.graphrag.chat import (
     LangGraphChatService,
     RigelGraphRAGError,
-    _apply_safe_limit,
-    _is_safe_readonly_cypher,
-    _sanitize_generated_cypher,
     _start_embedded_falkordb_runtime,
 )
 from rigel_demo.llm import LLMConfig, LLMMessage
 
 
 class LangGraphChatServiceTest(TestCase):
-    def test_send_messages_generates_cypher_executes_query_and_answers(self) -> None:
-        fake_model = _FakeChatModel(["MATCH (entity:Entity) RETURN entity", "PaymentService 处理支付流程"])
+    def test_send_messages_uses_vector_seed_tool_and_passes_evidence_to_answer(self) -> None:
+        fake_model = _FakeChatModel(
+            [
+                _tool_call("call:seed", "vector_search_seeds", {"query_text": "PaymentService", "limit": 99}),
+                _ai_text("证据足够"),
+                _ai_text("PaymentService 处理支付流程"),
+            ]
+        )
         fake_graph = _FakeGraph()
         chat = LangGraphChatService(
             config=_llm_config(),
             graphrag_config=_graphrag_config(),
             graph_name="rigel",
+            embedding_client=_FakeEmbeddingClient(),
             chat_model=fake_model,
             graph=fake_graph,
         )
@@ -34,38 +39,157 @@ class LangGraphChatServiceTest(TestCase):
         reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 做什么")])
 
         self.assertEqual(reply.content, "PaymentService 处理支付流程")
-        self.assertEqual(fake_graph.queries, ["MATCH (entity:Entity) RETURN entity LIMIT 20"])
-        self.assertEqual([trace.name for trace in reply.traces], ["cypher", "context"])
-        self.assertEqual(reply.traces[0].args["query"], "MATCH (entity:Entity) RETURN entity LIMIT 20")
-        self.assertEqual(reply.traces[1].args["items"], 1)
+        self.assertEqual(reply.traces[0].name, "vector_search_seeds")
+        self.assertEqual(reply.traces[0].args["query_text"], "PaymentService")
+        self.assertIn("limit 超过上限 5，已裁剪", reply.traces[0].args["warnings"])
+        answer_prompt = fake_model.calls[-1][1][1]
+        self.assertIn("PaymentService 处理付款流程", answer_prompt)
+        self.assertIn("entity:demo:PaymentService", answer_prompt)
+        self.assertEqual(fake_graph.queries[0]["params"]["vector_limit"], 5)
 
-    def test_send_messages_passes_recent_assistant_answer_to_followup_prompt(self) -> None:
-        fake_model = _FakeChatModel(["MATCH (entity:Entity) RETURN entity LIMIT 5", "它依赖 Repository"])
+    def test_expand_neighbors_allows_second_hop_and_skips_visited_node(self) -> None:
+        fake_model = _FakeChatModel(
+            [
+                _tool_call("call:seed", "vector_search_seeds", {"query_text": "PaymentService"}),
+                _tool_call("call:first-hop", "expand_neighbors", {"node_ids": ["entity:demo:PaymentService"]}),
+                _tool_call(
+                    "call:second-hop",
+                    "expand_neighbors",
+                    {"node_ids": ["entity:demo:PaymentService", "file:demo:PaymentService.java"]},
+                ),
+                _ai_text("证据足够"),
+                _ai_text("PaymentService 位于 PaymentService.java"),
+            ]
+        )
         chat = LangGraphChatService(
             config=_llm_config(),
             graphrag_config=_graphrag_config(),
             graph_name="rigel",
+            embedding_client=_FakeEmbeddingClient(),
             chat_model=fake_model,
             graph=_FakeGraph(),
         )
 
-        chat.send_messages(
-            [
-                LLMMessage(role="user", content="PaymentService 做什么"),
-                LLMMessage(role="assistant", content="它处理付款"),
-                LLMMessage(role="user", content="它依赖什么"),
-            ]
+        reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 在哪里")])
+
+        expand_traces = [trace for trace in reply.traces if trace.name == "expand_neighbors"]
+        self.assertEqual(len(expand_traces), 2)
+        self.assertEqual(expand_traces[0].args["relations"][0]["node"]["id"], "file:demo:PaymentService.java")
+        self.assertEqual(expand_traces[1].args["relations"][0]["node"]["id"], "module:demo:root")
+        self.assertIn("已扩展节点已忽略：entity:demo:PaymentService", expand_traces[1].args["warnings"])
+
+    def test_query_relation_supports_direction_and_visible_relation_whitelist(self) -> None:
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            embedding_client=_FakeEmbeddingClient(),
+            chat_model=_FakeChatModel([]),
+            graph=_FakeGraph(),
+        )
+        known_node_ids = {"entity:demo:PaymentService"}
+
+        outgoing = chat._query_relation(
+            {
+                "node_ids": ["entity:demo:PaymentService"],
+                "relation_type": "DEPENDS_ON",
+                "direction": "outgoing",
+            },
+            known_node_ids=known_node_ids,
+        )
+        incoming = chat._query_relation(
+            {
+                "node_ids": ["entity:demo:PaymentService"],
+                "relation_type": "DEPENDS_ON",
+                "direction": "incoming",
+            },
+            known_node_ids=known_node_ids,
+        )
+        both = chat._query_relation(
+            {
+                "node_ids": ["entity:demo:PaymentService"],
+                "relation_type": "DESCRIBES",
+                "direction": "both",
+            },
+            known_node_ids=known_node_ids,
         )
 
-        cypher_prompt = fake_model.calls[0][1][1]
-        self.assertIn("上一轮回答：它处理付款", cypher_prompt)
-        self.assertIn("用户追问：它依赖什么", cypher_prompt)
+        self.assertEqual(outgoing["items"][0]["direction"], "outgoing")
+        self.assertEqual(incoming["items"][0]["direction"], "incoming")
+        self.assertEqual(both["items"], [])
+        self.assertIn("非法关系类型已忽略：DESCRIBES", both["warnings"])
+
+    def test_tool_security_warnings_for_unknown_node_illegal_edge_and_large_limit(self) -> None:
+        fake_model = _FakeChatModel(
+            [
+                _tool_call("call:seed", "vector_search_seeds", {"query_text": "PaymentService"}),
+                _tool_call(
+                    "call:expand",
+                    "expand_neighbors",
+                    {
+                        "node_ids": ["entity:demo:PaymentService", "entity:demo:Unknown"],
+                        "edge_types": ["CONTAINS", "HAS_ANCHOR"],
+                        "limit_per_node": 100,
+                    },
+                ),
+                _ai_text("证据足够"),
+                _ai_text("只返回可见关系"),
+            ]
+        )
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            embedding_client=_FakeEmbeddingClient(),
+            chat_model=fake_model,
+            graph=_FakeGraph(),
+        )
+
+        reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 的关系")])
+
+        expand_trace = next(trace for trace in reply.traces if trace.name == "expand_neighbors")
+        self.assertIn("未知节点已忽略：entity:demo:Unknown", expand_trace.args["warnings"])
+        self.assertIn("非法边类型已忽略：HAS_ANCHOR", expand_trace.args["warnings"])
+        self.assertIn("limit_per_node 超过上限 8，已裁剪", expand_trace.args["warnings"])
+
+    def test_tool_call_limit_stops_retrieval_and_generates_answer(self) -> None:
+        fake_model = _FakeChatModel(
+            [
+                _tool_call("call:seed", "vector_search_seeds", {"query_text": "PaymentService"}),
+                _ai_tool_calls(
+                    [
+                        {
+                            "id": f"call:expand:{index}",
+                            "name": "expand_neighbors",
+                            "args": {"node_ids": ["entity:demo:PaymentService"]},
+                        }
+                        for index in range(4)
+                    ]
+                ),
+                _ai_text("无法从当前图谱确认更多证据"),
+            ]
+        )
+        chat = LangGraphChatService(
+            config=_llm_config(),
+            graphrag_config=_graphrag_config(),
+            graph_name="rigel",
+            embedding_client=_FakeEmbeddingClient(),
+            chat_model=fake_model,
+            graph=_FakeGraph(),
+        )
+
+        reply = chat.send_messages([LLMMessage(role="user", content="继续查")])
+
+        self.assertEqual(reply.content, "无法从当前图谱确认更多证据")
+        self.assertTrue(any("工具调用次数达到上限" in str(trace.args) for trace in reply.traces))
+        self.assertEqual(len(fake_model.calls), 3)
 
     def test_send_messages_rejects_empty_messages(self) -> None:
         chat = LangGraphChatService(
             config=_llm_config(),
             graphrag_config=_graphrag_config(),
             graph_name="rigel",
+            embedding_client=_FakeEmbeddingClient(),
             chat_model=_FakeChatModel([]),
             graph=_FakeGraph(),
         )
@@ -78,6 +202,7 @@ class LangGraphChatServiceTest(TestCase):
             config=_llm_config(),
             graphrag_config=_graphrag_config(),
             graph_name="rigel",
+            embedding_client=_FakeEmbeddingClient(),
             chat_model=_FakeChatModel([]),
             graph=_FakeGraph(),
         )
@@ -85,100 +210,33 @@ class LangGraphChatServiceTest(TestCase):
         with self.assertRaisesRegex(RigelGraphRAGError, "最后一条消息必须来自用户"):
             chat.send_messages([LLMMessage(role="assistant", content="回复")])
 
-    def test_unsafe_cypher_is_rejected_without_query_execution(self) -> None:
-        fake_graph = _FakeGraph()
-        chat = LangGraphChatService(
-            config=_llm_config(),
-            graphrag_config=_graphrag_config(),
-            graph_name="rigel",
-            chat_model=_FakeChatModel(["MATCH (n) DELETE n", "不应调用"]),
-            graph=fake_graph,
-        )
-
-        reply = chat.send_messages([LLMMessage(role="user", content="删除所有节点")])
-
-        self.assertEqual(reply.content, "无法生成安全只读查询，因此没有执行图数据库查询。")
-        self.assertEqual(fake_graph.queries, [])
-        self.assertEqual(reply.traces[0].args["rejected"], True)
-
-    def test_regex_match_is_rewritten_to_falkordb_contains(self) -> None:
+    def test_send_messages_passes_recent_assistant_answer_to_final_prompt(self) -> None:
         fake_model = _FakeChatModel(
             [
-                "MATCH (entity:Entity) WHERE entity.display_name =~ '(?i).*PaymentService.*' RETURN entity",
-                "PaymentService 处理支付流程",
+                _tool_call("call:seed", "vector_search_seeds", {"query_text": "PaymentService"}),
+                _ai_text("证据足够"),
+                _ai_text("它依赖 Repository"),
             ]
         )
-        fake_graph = _FakeGraph()
         chat = LangGraphChatService(
             config=_llm_config(),
             graphrag_config=_graphrag_config(),
             graph_name="rigel",
+            embedding_client=_FakeEmbeddingClient(),
             chat_model=fake_model,
-            graph=fake_graph,
+            graph=_FakeGraph(),
         )
 
-        reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 做什么")])
-
-        self.assertEqual(reply.content, "PaymentService 处理支付流程")
-        self.assertEqual(
-            fake_graph.queries,
+        chat.send_messages(
             [
-                "MATCH (entity:Entity) WHERE toLower(coalesce(entity.display_name, '')) "
-                "CONTAINS 'paymentservice' RETURN entity LIMIT 20"
-            ],
+                LLMMessage(role="user", content="PaymentService 做什么"),
+                LLMMessage(role="assistant", content="它处理付款"),
+                LLMMessage(role="user", content="它依赖什么"),
+            ]
         )
 
-    def test_complex_regex_match_is_rejected_without_query_execution(self) -> None:
-        fake_model = _FakeChatModel(["MATCH (entity:Entity) WHERE entity.display_name =~ 'Pay.*Service|Order' RETURN entity"])
-        fake_graph = _FakeGraph()
-        chat = LangGraphChatService(
-            config=_llm_config(),
-            graphrag_config=_graphrag_config(),
-            graph_name="rigel",
-            chat_model=fake_model,
-            graph=fake_graph,
-        )
-
-        reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 做什么")])
-
-        self.assertEqual(reply.content, "无法生成安全只读查询，因此没有执行图数据库查询。")
-        self.assertEqual(fake_graph.queries, [])
-        self.assertEqual(reply.traces[0].args["rejected"], True)
-
-    def test_query_execution_failure_degrades_to_empty_context_answer(self) -> None:
-        fake_model = _FakeChatModel(["MATCH (entity:Entity) RETURN entity", "无法从当前图谱确认"])
-        fake_graph = _FakeGraph(error=RuntimeError("Generated Cypher Statement is not valid"))
-        chat = LangGraphChatService(
-            config=_llm_config(),
-            graphrag_config=_graphrag_config(),
-            graph_name="rigel",
-            chat_model=fake_model,
-            graph=fake_graph,
-        )
-
-        reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 做什么")])
-
-        self.assertEqual(reply.content, "无法从当前图谱确认")
-        self.assertEqual(reply.traces[1].args["items"], 0)
-        self.assertIn("图查询执行失败", str(reply.traces[0].args["error"]))
-
-    def test_safe_cypher_validation_and_limit(self) -> None:
-        self.assertTrue(_is_safe_readonly_cypher("MATCH (n) RETURN n"))
-        self.assertTrue(
-            _is_safe_readonly_cypher(
-                "MATCH (n) WHERE toLower(coalesce(n.name, '')) CONTAINS 'payment' RETURN n"
-            )
-        )
-        self.assertFalse(_is_safe_readonly_cypher("CREATE (:Entity)"))
-        self.assertFalse(_is_safe_readonly_cypher("MATCH (n) RETURN n; MATCH (m) RETURN m"))
-        self.assertFalse(_is_safe_readonly_cypher("CALL db.labels()"))
-        self.assertFalse(_is_safe_readonly_cypher("MATCH (n) WHERE n.name =~ '.*Payment.*' RETURN n"))
-        self.assertEqual(_apply_safe_limit("MATCH (n) RETURN n"), "MATCH (n) RETURN n LIMIT 20")
-        self.assertEqual(_apply_safe_limit("MATCH (n) RETURN n LIMIT 3"), "MATCH (n) RETURN n LIMIT 3")
-        self.assertEqual(
-            _sanitize_generated_cypher("MATCH (n) WHERE n.name =~ '(?i).*Payment.*' RETURN n"),
-            "MATCH (n) WHERE toLower(coalesce(n.name, '')) CONTAINS 'payment' RETURN n",
-        )
+        answer_prompt = fake_model.calls[-1][1][1]
+        self.assertIn("上一轮回答：\n它处理付款", answer_prompt)
 
     def test_embedded_falkordblite_runtime_exposes_repository_database_over_tcp(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -198,27 +256,138 @@ class LangGraphChatServiceTest(TestCase):
         self.assertEqual(rows, [["repo:demo"]])
 
 
-class _FakeChatModel:
-    def __init__(self, responses: list[str]) -> None:
-        self._responses = responses
-        self.calls: list[list[tuple[str, str]]] = []
+def _tool_call(tool_call_id: str, name: str, args: dict[str, object]) -> SimpleNamespace:
+    return _ai_tool_calls([{"id": tool_call_id, "name": name, "args": args}])
 
-    def invoke(self, messages: list[tuple[str, str]]) -> SimpleNamespace:
+
+def _ai_tool_calls(tool_calls: list[dict[str, object]]) -> SimpleNamespace:
+    return SimpleNamespace(content="", tool_calls=tool_calls)
+
+
+def _ai_text(content: str) -> SimpleNamespace:
+    return SimpleNamespace(content=content, tool_calls=[])
+
+
+class _FakeChatModel:
+    def __init__(self, responses: list[SimpleNamespace]) -> None:
+        self._responses = responses
+        self.calls: list[list[object]] = []
+        self.bound_tools: list[object] = []
+
+    def bind_tools(self, tools: list[object]) -> "_FakeChatModel":
+        self.bound_tools = tools
+        return self
+
+    def invoke(self, messages: list[object]) -> SimpleNamespace:
         self.calls.append(messages)
-        return SimpleNamespace(content=self._responses.pop(0))
+        return self._responses.pop(0)
 
 
 class _FakeGraph:
-    def __init__(self, *, error: Exception | None = None) -> None:
+    def __init__(self) -> None:
         self.get_schema = "(:Entity {id: STRING})"
-        self.queries: list[str] = []
-        self.error = error
+        self.queries: list[dict[str, object]] = []
 
-    def query(self, cypher: str) -> list[dict[str, object]]:
-        self.queries.append(cypher)
-        if self.error is not None:
-            raise self.error
-        return [{"entity": {"id": "entity:demo:PaymentService", "display_name": "PaymentService"}}]
+    def query(self, query_text: str, params: dict[str, object]) -> list[dict[str, object]]:
+        self.queries.append({"query": query_text, "params": params})
+        if "queryNodes" in query_text:
+            return [
+                {
+                    "summary_id": "summary:entity:demo:PaymentService",
+                    "summary_properties": {
+                        "rigel_type": "Summary",
+                        "text": "PaymentService 处理付款流程",
+                        "summary_model": "summary-model",
+                        "embedding_model": "text-embedding-3-small",
+                        "embedding_dimensions": 3,
+                        "source_hash": "sha256:payment-service",
+                    },
+                    "node_id": "entity:demo:PaymentService",
+                    "node_properties": _payment_entity_properties(),
+                    "distance": 0.1,
+                }
+            ]
+
+        node_id = str(params["node_id"])
+        if "WHERE source.id = $node_id" in query_text:
+            return [_relation_row(node_id, "entity:demo:OrderRepository", "DEPENDS_ON")]
+        if "WHERE target.id = $node_id" in query_text:
+            return [_relation_row("file:demo:PaymentService.java", node_id, "CONTAINS")]
+        if node_id == "entity:demo:PaymentService":
+            return [_relation_row("file:demo:PaymentService.java", node_id, "CONTAINS")]
+        if node_id == "file:demo:PaymentService.java":
+            return [_relation_row("module:demo:root", node_id, "CONTAINS")]
+        return []
+
+
+def _relation_row(source_id: str, target_id: str, edge_type: str) -> dict[str, object]:
+    return {
+        "source_id": source_id,
+        "source_properties": _node_properties(source_id),
+        "target_id": target_id,
+        "target_properties": _node_properties(target_id),
+        "edge_type": edge_type,
+        "edge_properties": {
+            "id": f"{edge_type.lower()}:{source_id}:{target_id}",
+            "kind": "test",
+        },
+    }
+
+
+def _node_properties(node_id: str) -> dict[str, object]:
+    if node_id == "entity:demo:PaymentService":
+        return _payment_entity_properties()
+    if node_id == "entity:demo:OrderRepository":
+        return {
+            "rigel_type": "Entity",
+            "display_name": "OrderRepository",
+            "qualified_name": "demo.OrderRepository",
+        }
+    if node_id == "file:demo:PaymentService.java":
+        return {
+            "rigel_type": "File",
+            "relative_path": "src/main/java/demo/PaymentService.java",
+            "language": "java",
+            "zone": "prod",
+            "content_hash": "sha256:payment-file",
+        }
+    return {
+        "rigel_type": "Module",
+        "name": "root",
+        "root_path": ".",
+        "ecosystem": "maven",
+        "zone": "prod",
+    }
+
+
+def _payment_entity_properties() -> dict[str, object]:
+    return {
+        "rigel_type": "Entity",
+        "display_name": "PaymentService",
+        "qualified_name": "demo.PaymentService",
+        "kind_norm": "class",
+        "kind_raw": "class_declaration",
+        "origin": "internal",
+        "semantic_hash": "sha256:payment-service",
+    }
+
+
+class _FakeEmbeddingClient:
+    def __init__(self) -> None:
+        self.config = EmbeddingConfig(
+            provider="openai",
+            format=EmbeddingFormat.OPENAI_EMBEDDINGS,
+            model="text-embedding-3-small",
+            api_key="fake-key",
+            base_url=None,
+            dimensions=3,
+            timeout_seconds=1,
+            batch_size=8,
+            input_mode=EmbeddingInputMode.ARRAY,
+        )
+
+    def embed_query(self, text: str) -> list[float]:
+        return [1.0, 0.0, 0.0]
 
 
 def _llm_config() -> LLMConfig:

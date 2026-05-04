@@ -1,6 +1,6 @@
 import type { ApiGraphRAGQuery } from '../api/rigel';
 
-const QUERY_SUMMARY_KEYS = ['query', 'items'] as const;
+const QUERY_SUMMARY_KEYS = ['query_text', 'items', 'relations'] as const;
 
 export function formatGraphRAGQuery(query: ApiGraphRAGQuery): string {
   const summary = QUERY_SUMMARY_KEYS

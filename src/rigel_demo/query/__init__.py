@@ -1,9 +1,7 @@
-"""图谱展示、neighbors、paths、auto_complete 与 Summary recall。"""
+"""图谱展示、neighbors、paths 与 auto_complete 查询服务。"""
 
 from rigel_demo.query.service import (
     DEFAULT_GRAPH_LIMIT,
-    DEFAULT_RECALL_EXPANSION_LIMIT,
-    DEFAULT_RECALL_LIMIT,
     GraphExpansionDirection,
     RigelGraphReader,
 )
@@ -17,8 +15,6 @@ from rigel_demo.query.source_reader import (
 
 __all__ = [
     "DEFAULT_GRAPH_LIMIT",
-    "DEFAULT_RECALL_EXPANSION_LIMIT",
-    "DEFAULT_RECALL_LIMIT",
     "GraphExpansionDirection",
     "RepositorySourceReader",
     "RigelGraphReader",

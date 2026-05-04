@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import { formatGraphRAGQuery, formatQueryArgs } from './chatPresentation';
 
 assert.equal(
-  formatGraphRAGQuery({ name: 'cypher', args: { query: 'MATCH (node) RETURN node' } }),
-  'cypher: MATCH (node) RETURN node',
+  formatGraphRAGQuery({ name: 'vector_search_seeds', args: { query_text: 'PaymentService' } }),
+  'vector_search_seeds: PaymentService',
 );
 
 assert.equal(
-  formatGraphRAGQuery({ name: 'recall', args: { items: ['PaymentService', 'OrderRepository', 'CheckoutController'] } }),
-  'recall: PaymentService, OrderRepository, CheckoutController',
+  formatGraphRAGQuery({ name: 'expand_neighbors', args: { items: ['PaymentService', 'OrderRepository', 'CheckoutController'] } }),
+  'expand_neighbors: PaymentService, OrderRepository, CheckoutController',
 );
 
 assert.equal(

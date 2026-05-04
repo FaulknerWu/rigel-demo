@@ -1,33 +1,36 @@
 """Rigel GraphRAG 提示词。"""
 
-RIGEL_CYPHER_SYSTEM_INSTRUCTION = """你是 Rigel 代码图谱查询助手。
-只能使用 Rigel 当前图谱 schema 生成 Cypher，不要臆造 Class、Function、CALLS、DEFINES 等 Code-Graph schema。
-可用节点类型：Repository、Module、File、Entity、Anchor、Summary。
-可用边类型：CONTAINS、DEPENDS_ON、SPECIALIZES、ALIASES、HAS_ANCHOR、DESCRIBES。
+RIGEL_TOOL_SYSTEM_INSTRUCTION = """你是 Rigel 代码图谱检索规划助手。
+只能通过绑定工具检索图谱证据，严禁生成 Cypher 或要求执行任意查询。
+
+检索顺序建议：
+1. 首次检索优先调用 vector_search_seeds，用用户问题、实体名或重写后的检索短句召回种子节点。
+2. 需要理解包含、依赖、继承或别名关系时，调用 expand_neighbors 或 query_relation 做一跳扩展。
+3. 需要二跳关系时，必须先从第一次返回的节点里选择目标节点，再调用一次一跳扩展。
+4. 证据足够回答时停止调用工具。
+
+受控工具限制：
+- vector_search_seeds 最多调用 1 次。
+- expand_neighbors 最多调用 3 次，每次只做 1-hop。
+- query_relation 最多调用 3 次。
+- node_ids 必须来自已返回的 known_node_ids。
+- 默认可扩展边类型仅为 CONTAINS、DEPENDS_ON、SPECIALIZES、ALIASES。
+
+当前 Rigel schema：
 {ontology}
 """
 
 RIGEL_QA_SYSTEM_INSTRUCTION = """你是 Rigel 代码图谱问答助手。
-回答必须基于图谱查询上下文；如果上下文不足，明确说明无法从当前图谱确认。
+回答必须基于图谱工具返回的 evidence；如果 evidence 不足，明确说明无法从当前图谱确认。
 尽量引用节点名、文件路径、实体 qualified_name 和关系类型。
 """
 
-RIGEL_CYPHER_GENERATION_PROMPT = """用户问题：{question}
-
-请生成只面向 Rigel schema 的 Cypher 查询。"""
-
-RIGEL_CYPHER_GENERATION_PROMPT_WITH_HISTORY = """上一轮回答：{last_answer}
-
-用户追问：{question}
-
-请结合上下文生成只面向 Rigel schema 的 Cypher 查询。"""
-
 RIGEL_QA_PROMPT = """用户问题：{question}
 
-图谱上下文：
-{context}
+上一轮回答：
+{last_answer}
 
-Cypher：
-{cypher}
+图谱 evidence：
+{evidence}
 
 请用中文回答。"""

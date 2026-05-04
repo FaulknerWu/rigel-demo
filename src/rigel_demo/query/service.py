@@ -7,16 +7,13 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from rigel_demo.project.summaries import RETRIEVAL_SUMMARY_PURPOSE
-from rigel_demo.query.context import source_slices_for_anchors
 from rigel_demo.query.presentation import (
     anchor_sort_key,
-    cosine_distance_to_similarity,
     format_anchor,
     format_edge,
     format_graph_relation,
     format_node,
     format_source_file,
-    format_summary,
 )
 from rigel_demo.query.source_reader import (
     RepositorySourceReader,
@@ -28,8 +25,6 @@ from rigel_demo.query.source_reader import (
 from rigel_demo.storage.falkordb.store import FalkorDBConfig, FalkorDBStore
 
 DEFAULT_GRAPH_LIMIT = 500
-DEFAULT_RECALL_LIMIT = 8
-DEFAULT_RECALL_EXPANSION_LIMIT = 3
 VISIBLE_NODE_TYPES = ("Repository", "Module", "File", "Entity")
 VISIBLE_EDGE_TYPES = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES")
 
@@ -158,88 +153,6 @@ class RigelGraphReader:
             if node_id_text not in summaries_by_node_id and isinstance(summary_text, str):
                 summaries_by_node_id[node_id_text] = summary_text
         return summaries_by_node_id
-
-    def recall(
-        self,
-        query_embedding: list[float],
-        *,
-        embedding_model: str,
-        limit: int,
-        expansion_limit: int,
-    ) -> list[dict[str, object]]:
-        """通过 Summary embedding 召回种子节点并补充一跳图谱上下文。"""
-
-        rows = self._query(
-            """
-            CALL db.idx.vector.queryNodes('Summary', 'embedding', $vector_limit, vecf32($query_embedding))
-            YIELD node AS summary, score AS distance
-            MATCH (summary)-[:DESCRIBES]->(target:RigelNode)
-            WHERE summary.purpose = $purpose
-              AND summary.embedding_model = $embedding_model
-              AND summary.embedding_dimensions = $embedding_dimensions
-              AND target.rigel_type IN $visible_node_types
-            RETURN summary.id, properties(summary), target.id, properties(target), distance
-            ORDER BY distance ASC
-            """,
-            {
-                "purpose": RETRIEVAL_SUMMARY_PURPOSE,
-                "embedding_model": embedding_model,
-                "embedding_dimensions": len(query_embedding),
-                "visible_node_types": list(VISIBLE_NODE_TYPES),
-                "query_embedding": query_embedding,
-                "vector_limit": limit,
-            },
-        )
-        scored_results: list[dict[str, object]] = []
-        for summary_id, summary_properties, target_id, target_properties, distance in rows:
-            score = cosine_distance_to_similarity(distance)
-            if score <= 0:
-                continue
-            node = format_node(target_id, target_properties)
-            scored_results.append(
-                {
-                    "score": score,
-                    "summary": format_summary(summary_id, summary_properties),
-                    "node": node,
-                    "related": self.related_nodes(target_id, limit=expansion_limit),
-                }
-            )
-
-        scored_results.sort(
-            key=lambda result: (
-                -cast(float, result["score"]),
-                str(cast(Mapping[str, object], result["node"])["label"]),
-            )
-        )
-        return scored_results[:limit]
-
-    def context(
-        self,
-        *,
-        query: str,
-        query_embedding: list[float],
-        embedding_model: str,
-        limit: int,
-        expansion_limit: int,
-        source_reader: RepositorySourceReader,
-    ) -> dict[str, object]:
-        """组装可直接引用的结构化图谱上下文。"""
-
-        # 该接口不生成自然语言答案，只返回可追溯的图谱证据和源码切片。
-        recall_results = self.recall(
-            query_embedding,
-            embedding_model=embedding_model,
-            limit=limit,
-            expansion_limit=expansion_limit,
-        )
-        return {
-            "query": query,
-            "strategy": "vector_recall",
-            "seeds": [
-                self._context_seed_from_recall_result(index, result, source_reader=source_reader)
-                for index, result in enumerate(recall_results, start=1)
-            ],
-        }
 
     def anchors_for_node(self, node_id: str) -> dict[str, object] | None:
         """返回节点和它的源码锚点；节点不存在时返回 None。"""
@@ -406,28 +319,6 @@ class RigelGraphReader:
         )
         relations = [format_graph_relation(row, origin_node_id=node_id) for row in rows]
         return {"node_id": node_id, "relations": relations}
-
-    def _context_seed_from_recall_result(
-        self,
-        rank: int,
-        result: dict[str, object],
-        *,
-        source_reader: RepositorySourceReader,
-    ) -> dict[str, object]:
-        node = cast(dict[str, object], result["node"])
-        node_id = str(node["id"])
-        source_file = self._source_file_for_node(node_id)
-        anchors = self._anchors_for_node(node_id, source_file=source_file)
-        return {
-            "rank": rank,
-            "score": result["score"],
-            "summary": result["summary"],
-            "node": node,
-            "related": result["related"],
-            "source_file": source_file,
-            "anchors": anchors,
-            "source_slices": source_slices_for_anchors(anchors, source_reader=source_reader),
-        }
 
     def _anchors_for_node(
         self,

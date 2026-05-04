@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { ArrowUp, Bot, Database, User } from 'lucide-react';
+import Markdown, { type Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { sendChatMessage, type ApiGraphRAGQuery, type ChatMessage } from '../api/rigel';
 import { formatGraphRAGQuery, formatQueryArgs } from './chatPresentation';
 
@@ -8,6 +10,40 @@ interface Message {
   content: string;
   queries?: ApiGraphRAGQuery[];
 }
+
+const markdownComponents: Components = {
+  h1: ({ children }) => <h1 className="mb-2 mt-3 text-base font-semibold leading-snug text-slate-950 first:mt-0">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-2 mt-3 text-[15px] font-semibold leading-snug text-slate-950 first:mt-0">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-1.5 mt-3 text-sm font-semibold leading-snug text-slate-900 first:mt-0">{children}</h3>,
+  h4: ({ children }) => <h4 className="mb-1.5 mt-2.5 text-[13px] font-semibold leading-snug text-slate-900 first:mt-0">{children}</h4>,
+  p: ({ children }) => <p className="my-2 first:mt-0 last:mb-0">{children}</p>,
+  ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-5 first:mt-0 last:mb-0">{children}</ul>,
+  ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pl-5 first:mt-0 last:mb-0">{children}</ol>,
+  li: ({ children }) => <li className="pl-0.5">{children}</li>,
+  blockquote: ({ children }) => <blockquote className="my-2 border-l-2 border-slate-300 pl-3 text-slate-600">{children}</blockquote>,
+  a: ({ children, href }) => (
+    <a className="font-medium text-slate-950 underline decoration-slate-300 underline-offset-2" href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  ),
+  code: ({ children, className }) => {
+    const isCodeBlock = className?.startsWith('language-');
+
+    if (isCodeBlock) {
+      return <code className={className}>{children}</code>;
+    }
+
+    return <code className="rounded bg-slate-100 px-1 py-0.5 text-[12px] text-slate-900 break-words">{children}</code>;
+  },
+  pre: ({ children }) => <pre className="my-2 max-w-full overflow-x-auto rounded-md bg-slate-950 p-3 text-[12px] leading-relaxed text-slate-100">{children}</pre>,
+  table: ({ children }) => (
+    <div className="my-2 max-w-full overflow-x-auto">
+      <table className="min-w-max border-collapse text-left text-[12px]">{children}</table>
+    </div>
+  ),
+  th: ({ children }) => <th className="border border-slate-200 bg-slate-50 px-2 py-1 font-semibold text-slate-800">{children}</th>,
+  td: ({ children }) => <td className="border border-slate-200 px-2 py-1 align-top">{children}</td>,
+};
 
 export default function ChatPanel() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -39,7 +75,7 @@ export default function ChatPanel() {
   };
 
   return (
-    <aside className="relative flex h-full flex-col bg-white text-slate-800">
+    <aside className="relative flex h-full min-w-0 flex-col overflow-hidden bg-white text-slate-800">
       <div className="flex items-center gap-2 border-b border-slate-100 p-4">
         <div className="h-2 w-2 animate-pulse rounded-full bg-black shadow-[0_0_8px_rgba(0,0,0,0.3)]"></div>
         <span className="text-xs font-semibold uppercase tracking-wider text-slate-800">GraphRAG Chat</span>
@@ -54,15 +90,15 @@ export default function ChatPanel() {
             </p>
           </div>
         ) : (
-          <div className="flex flex-col gap-6 p-5">
+          <div className="flex min-w-0 flex-col gap-6 p-5">
             {messages.map((message, index) => (
-              <div key={index} className={`flex gap-3 ${message.role === 'user' ? 'flex-row-reverse' : ''}`}>
+              <div key={index} className={`flex w-full min-w-0 gap-3 ${message.role === 'user' ? 'flex-row-reverse' : ''}`}>
                 <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${message.role === 'user' ? 'bg-slate-100' : 'bg-black text-white'}`}>
                   {message.role === 'user' ? <User className="h-4 w-4 text-slate-500" /> : <Bot className="h-4 w-4" />}
                 </div>
-                <div className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
+                <div className={`flex min-w-0 flex-1 flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
                   {message.role === 'assistant' && message.queries && message.queries.length > 0 && (
-                    <div className="mb-2 flex max-w-[280px] flex-wrap gap-1.5">
+                    <div className="mb-2 flex max-w-full flex-wrap gap-1.5">
                       {message.queries.map((query, queryIndex) => (
                         <span
                           key={`${query.name}-${queryIndex}`}
@@ -75,9 +111,7 @@ export default function ChatPanel() {
                       ))}
                     </div>
                   )}
-                  <div className={`max-w-[280px] whitespace-pre-wrap rounded-2xl px-4 py-3 text-[13px] leading-relaxed ${message.role === 'user' ? 'bg-slate-100 text-slate-900' : 'bg-transparent text-slate-800'}`}>
-                    {message.content}
-                  </div>
+                  <MessageContent message={message} />
                 </div>
               </div>
             ))}
@@ -123,6 +157,20 @@ export default function ChatPanel() {
         </div>
       </div>
     </aside>
+  );
+}
+
+function MessageContent({ message }: { message: Message }) {
+  const messageClasses = `max-w-full overflow-hidden rounded-2xl px-4 py-3 text-[13px] leading-relaxed break-words ${
+    message.role === 'user' ? 'bg-slate-100 text-slate-900' : 'bg-transparent text-slate-800'
+  }`;
+
+  return (
+    <div className={messageClasses}>
+      <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {message.content}
+      </Markdown>
+    </div>
   );
 }
 

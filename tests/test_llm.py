@@ -7,6 +7,9 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from openai import DefaultHttpxClient
+
 from rigel_demo.llm import (
     DEFAULT_CHAT_SYSTEM_PROMPT,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
@@ -17,6 +20,7 @@ from rigel_demo.llm import (
     LangChainSummaryClient,
     build_langchain_chat_model,
 )
+from rigel_demo.llm.client import ReasoningContentChatOpenAI
 
 
 class LLMConfigTest(TestCase):
@@ -223,7 +227,7 @@ class LangChainLLMTest(TestCase):
     def test_build_langchain_chat_model_uses_project_config(self) -> None:
         config = _config(temperature=0, max_output_tokens=300)
 
-        with patch("langchain_openai.ChatOpenAI", _FakeChatOpenAI):
+        with patch("rigel_demo.llm.client.ReasoningContentChatOpenAI", _FakeChatOpenAI):
             chat_model = build_langchain_chat_model(config)
 
         self.assertEqual(
@@ -235,6 +239,64 @@ class LangChainLLMTest(TestCase):
                 "temperature": 0,
                 "model_kwargs": {"max_completion_tokens": 300},
             },
+        )
+
+    def test_chat_model_passes_reasoning_content_back_with_tool_calls(self) -> None:
+        chat_model = ReasoningContentChatOpenAI(
+            model="test-model",
+            api_key="test-key",
+            http_client=DefaultHttpxClient(trust_env=False),
+        )
+
+        payload = chat_model._get_request_payload(
+            [
+                HumanMessage(content="PaymentService 做什么"),
+                AIMessage(
+                    content="",
+                    additional_kwargs={"reasoning_content": "需要先检索摘要"},
+                    tool_calls=[{"id": "call:seed", "name": "vector_search_seeds", "args": {"query_text": "PaymentService"}}],
+                ),
+                ToolMessage(content='{"items":[]}', tool_call_id="call:seed"),
+            ]
+        )
+
+        assistant_payload = payload["messages"][1]
+        self.assertEqual(assistant_payload["reasoning_content"], "需要先检索摘要")
+        self.assertEqual(assistant_payload["tool_calls"][0]["id"], "call:seed")
+
+    def test_chat_model_keeps_reasoning_content_from_response(self) -> None:
+        chat_model = ReasoningContentChatOpenAI(
+            model="test-model",
+            api_key="test-key",
+            http_client=DefaultHttpxClient(trust_env=False),
+        )
+
+        result = chat_model._create_chat_result(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "先调用向量检索工具",
+                            "tool_calls": [
+                                {
+                                    "id": "call:seed",
+                                    "type": "function",
+                                    "function": {"name": "vector_search_seeds", "arguments": "{\"query_text\":\"PaymentService\"}"},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "model": "test-model",
+            }
+        )
+
+        self.assertEqual(
+            result.generations[0].message.additional_kwargs["reasoning_content"],
+            "先调用向量检索工具",
         )
 
     def test_summary_client_invokes_chatopenai_with_system_prompt(self) -> None:
