@@ -113,8 +113,8 @@ export default function GraphPanel() {
             linkCanvasObjectMode={() => 'after'}
             nodeLabel={(node: any) => `
               <div style="background-color: rgba(15, 23, 42, 0.95); color: #e2e8f0; padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1); max-width: 250px; font-family: ui-sans-serif, system-ui, sans-serif; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); backdrop-filter: blur(8px);">
-                <div style="font-weight: 600; color: #ffffff; margin-bottom: 6px; font-size: 13px;">${node.name || node.id}</div>
-                <div style="font-size: 11px; color: #94a3b8; white-space: pre-wrap; line-height: 1.5;">${node.summary || ''}</div>
+                <div style="font-weight: 600; color: #ffffff; margin-bottom: 6px; font-size: 13px;">${node.name}</div>
+                <div style="font-size: 11px; color: #94a3b8; white-space: pre-wrap; line-height: 1.5;">${node.summary}</div>
               </div>
             `}
             linkCanvasObject={(link: any, canvasContext: CanvasRenderingContext2D, globalScale: number) => {
@@ -134,7 +134,7 @@ export default function GraphPanel() {
               if (textAngle > Math.PI / 2) textAngle = -(Math.PI - textAngle);
               if (textAngle < -Math.PI / 2) textAngle = -(Math.PI + textAngle);
 
-              const label = link.type || '';
+              const label = link.type;
               const fontSize = 3.5;
 
               canvasContext.save();
@@ -158,7 +158,7 @@ export default function GraphPanel() {
 
               canvasContext.beginPath();
               canvasContext.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
-              canvasContext.fillStyle = node.color || '#888888';
+              canvasContext.fillStyle = node.color;
               canvasContext.fill();
               canvasContext.strokeStyle = 'rgba(255, 255, 255, 0.9)';
               canvasContext.lineWidth = 1.2;
@@ -167,7 +167,7 @@ export default function GraphPanel() {
               if (globalScale < 2.5) return;
 
               // 节点内部只放短标签，完整信息交给 hover tooltip，避免画布局部拥挤。
-              const label = node.name || node.id;
+              const label = node.name;
               const fontSize = radius * 0.45;
               canvasContext.font = `600 ${fontSize}px Sans-Serif`;
 

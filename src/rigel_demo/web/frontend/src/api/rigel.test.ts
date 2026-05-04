@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { adaptGraph, adaptIndexResult, adaptNode, adaptRecallResult, adaptSummary, type ApiGraph, type ApiIndexResult, type ApiNode, type ApiRecallResult, type ApiSummary } from './rigel';
+import { adaptGraph, adaptIndexResult, adaptNode, adaptSummary, type ApiGraph, type ApiIndexResult, type ApiNode, type ApiSummary } from './rigel';
 
 const apiNode: ApiNode = {
   id: 'node-1',
@@ -56,38 +56,6 @@ assert.deepEqual(graphSummary, {
   nodeTypes: [{ type: 'Class', count: 1 }],
 });
 
-const recallResult: ApiRecallResult = {
-  score: 0.75,
-  summary: {
-    id: 'summary-1',
-    text: 'Class RepositoryIndexer',
-    summary_model: 'gpt-5.2',
-    embedding_model: 'text-embedding-3-small',
-    embedding_dimensions: 3,
-    source_hash: 'sha256:test',
-  },
-  node: apiNode,
-  related: [
-    {
-      direction: 'outgoing',
-      edge: apiGraph.edges[0],
-      node: {
-        ...apiNode,
-        id: 'node-2',
-        label: 'GraphIR',
-      },
-    },
-  ],
-};
-
-const adaptedRecallResult = adaptRecallResult(recallResult);
-assert.equal(adaptedRecallResult.score, 0.75);
-assert.equal(adaptedRecallResult.summary, 'Class RepositoryIndexer');
-assert.equal(adaptedRecallResult.node.name, 'RepositoryIndexer');
-assert.deepEqual(adaptedRecallResult.related.map((related) => [related.direction, related.edgeType, related.node.name]), [
-  ['outgoing', 'CALLS', 'GraphIR'],
-]);
-
 const apiIndexResult: ApiIndexResult = {
   mode: 'incremental',
   mode_label: '增量',
@@ -100,7 +68,6 @@ const apiIndexResult: ApiIndexResult = {
   graph_node_count: 30,
   graph_edge_count: 24,
   duration_ms: 120,
-  incremental_fallback: false,
 };
 
 const indexResult = adaptIndexResult(apiIndexResult);

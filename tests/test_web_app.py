@@ -20,6 +20,7 @@ from rigel_demo.llm import (
     LLMConfigurationError,
     LLMMessage,
 )
+from rigel_demo.agent.service import RepositorySourceReader, SourceLineRangeError
 from rigel_demo.storage import FalkorDBConfig, FalkorDBStore
 from rigel_demo.web.app import create_app
 
@@ -67,22 +68,6 @@ class WebAppLLMTest(TestCase):
         self.assertIn("代码图谱搜索上下文", fake_llm.messages[0].content)
         self.assertIn("PaymentService 做什么", fake_llm.messages[0].content)
 
-    def test_recall_returns_summary_seed_and_related_context(self) -> None:
-        fake_embedding = _FakeEmbeddingClient()
-        with TemporaryDirectory() as workspace:
-            repository_path = Path(workspace)
-            _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
-
-            response = client.get("/api/recall", params={"q": "PaymentService", "limit": "3"})
-
-        self.assertEqual(response.status_code, 200)
-        result = response.json()["results"][0]
-        self.assertGreater(result["score"], 0)
-        self.assertEqual(result["node"]["label"], "PaymentService")
-        self.assertIn("PaymentService", result["summary"]["text"])
-        self.assertEqual(result["related"][0]["edge"]["type"], "CONTAINS")
-
     def test_recall_uses_falkordb_vector_index(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
@@ -101,46 +86,6 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(summary_index[3]["embedding"]["dimension"], 3)
         self.assertEqual(summary_index[3]["embedding"]["similarityFunction"], "cosine")
         self.assertTrue(any(row[0].startswith("summary:") for row in vector_rows))
-
-    def test_context_returns_structured_seed_anchors_and_source_file(self) -> None:
-        fake_embedding = _FakeEmbeddingClient()
-        with TemporaryDirectory() as workspace:
-            repository_path = Path(workspace)
-            _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
-
-            response = client.get("/api/context", params={"q": "PaymentService", "limit": "3"})
-
-        self.assertEqual(response.status_code, 200)
-        context = response.json()["context"]
-        self.assertEqual(context["query"], "PaymentService")
-        self.assertEqual(context["strategy"], "vector_recall")
-        seed = context["seeds"][0]
-        self.assertEqual(seed["rank"], 1)
-        self.assertGreater(seed["score"], 0)
-        self.assertEqual(seed["node"]["label"], "PaymentService")
-        self.assertIn("PaymentService", seed["summary"]["text"])
-        self.assertEqual(seed["source_file"]["relative_path"], "src/main/java/demo/PaymentService.java")
-        self.assertEqual(seed["anchors"][0]["role"], "definition")
-        self.assertEqual(seed["anchors"][0]["start_line"], 3)
-        self.assertEqual(seed["anchors"][0]["source_file"]["relative_path"], "src/main/java/demo/PaymentService.java")
-        self.assertEqual(seed["source_slices"][0]["relative_path"], "src/main/java/demo/PaymentService.java")
-        self.assertEqual(seed["source_slices"][0]["start_line"], 3)
-        self.assertIn("class PaymentService", seed["source_slices"][0]["content"])
-
-    def test_context_keeps_vector_strategy_without_keyword_fallback(self) -> None:
-        fake_embedding = _FakeEmbeddingClient()
-        with TemporaryDirectory() as workspace:
-            repository_path = Path(workspace)
-            _write_demo_graph(repository_path, fake_embedding)
-            client = TestClient(create_app(repository_path, embedding_client=fake_embedding))
-
-            response = client.get("/api/context", params={"q": "NoMatch", "limit": "3"})
-
-        self.assertEqual(response.status_code, 200)
-        context = response.json()["context"]
-        self.assertEqual(context["strategy"], "vector_recall")
-        self.assertEqual(context["seeds"], [])
 
     def test_agent_semantic_recall_returns_structured_context(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
@@ -220,6 +165,24 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(source["end_line"], 4)
         self.assertTrue(source["truncated"])
         self.assertIn("class PaymentService", source["content"])
+
+    def test_source_reader_rejects_non_integer_line_ranges(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            repository_path.joinpath("Demo.java").write_text("class Demo {}\n", encoding="utf-8")
+            source_reader = RepositorySourceReader(repository_path)
+
+            invalid_cases = [
+                {"start_line": "1", "end_line": 1, "max_lines": 1},
+                {"start_line": 1, "end_line": 1.0, "max_lines": 1},
+                {"start_line": 1, "end_line": 1, "max_lines": None},
+                {"start_line": True, "end_line": 1, "max_lines": 1},
+            ]
+
+            for invalid_case in invalid_cases:
+                with self.subTest(invalid_case=invalid_case):
+                    with self.assertRaisesRegex(SourceLineRangeError, "必须大于 0"):
+                        source_reader.read_slice("Demo.java", **invalid_case)
 
     def test_agent_read_source_slice_rejects_path_outside_repository(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
@@ -379,7 +342,6 @@ class WebAppLLMTest(TestCase):
                     graph_node_count=12,
                     graph_edge_count=9,
                     duration_ms=25,
-                    incremental_fallback=False,
                 )
 
                 response = client.post("/api/index/incremental")

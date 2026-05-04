@@ -75,7 +75,6 @@ def create_app(
     static_assets_path = static_frontend_path / "assets"
     static_index_path = static_frontend_path / "index.html"
     graph_name = _read_graph_name(state_path)
-    # Web 入口复用 CLI 索引状态，确保展示和 `rigel index` 写入的是同一个本地图谱。
     graph_reader = RigelGraphReader(database_path=database_path, graph_name=graph_name)
     source_reader = RepositorySourceReader(resolved_repository_path)
     active_chat_client = _resolve_chat_client(resolved_repository_path, chat_client)
@@ -159,54 +158,6 @@ def create_app(
                 **source_slice,
                 "source_file": source_file,
             },
-        }
-
-    @app.get("/api/recall")
-    def recall(q: str, limit: int = DEFAULT_RECALL_LIMIT) -> dict[str, object]:
-        """基于 Summary 向量召回代码图谱种子节点。"""
-
-        _ensure_database_exists(database_path)
-        if not q.strip():
-            raise HTTPException(status_code=400, detail="q 不能为空")
-        if limit < 1:
-            raise HTTPException(status_code=400, detail="limit 必须大于 0")
-        try:
-            query_embedding = active_embedding_client.embed_query(q.strip())
-        except (EmbeddingRequestError, EmbeddingResponseError) as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
-        return {
-            "status": "success",
-            "results": graph_reader.recall(
-                query_embedding,
-                embedding_model=active_embedding_client.config.model,
-                limit=limit,
-                expansion_limit=DEFAULT_RECALL_EXPANSION_LIMIT,
-            ),
-        }
-
-    @app.get("/api/context")
-    def context(q: str, limit: int = DEFAULT_RECALL_LIMIT) -> dict[str, object]:
-        """返回 Agent 可消费的结构化代码图谱上下文。"""
-
-        _ensure_database_exists(database_path)
-        if not q.strip():
-            raise HTTPException(status_code=400, detail="q 不能为空")
-        if limit < 1:
-            raise HTTPException(status_code=400, detail="limit 必须大于 0")
-        try:
-            query_embedding = active_embedding_client.embed_query(q.strip())
-        except (EmbeddingRequestError, EmbeddingResponseError) as error:
-            raise HTTPException(status_code=502, detail=str(error)) from error
-        return {
-            "status": "success",
-            "context": graph_reader.context(
-                query=q.strip(),
-                query_embedding=query_embedding,
-                embedding_model=active_embedding_client.config.model,
-                limit=limit,
-                expansion_limit=DEFAULT_RECALL_EXPANSION_LIMIT,
-                source_reader=source_reader,
-            ),
         }
 
     @app.post("/api/agent/tools/semantic_recall")

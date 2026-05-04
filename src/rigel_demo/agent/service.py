@@ -58,11 +58,10 @@ class RepositorySourceReader:
         max_lines: int = DEFAULT_SOURCE_SLICE_MAX_LINES,
     ) -> dict[str, object]:
         normalized_path = self.normalize_relative_path(relative_path)
-        if isinstance(max_lines, bool) or max_lines < 1:
-            raise SourceLineRangeError("max_lines 必须大于 0")
-        if isinstance(start_line, bool) or start_line < 1:
-            raise SourceLineRangeError("start_line 必须大于 0")
-        if isinstance(end_line, bool) or end_line < start_line:
+        _ensure_positive_int(max_lines, "max_lines")
+        _ensure_positive_int(start_line, "start_line")
+        _ensure_positive_int(end_line, "end_line")
+        if end_line < start_line:
             raise SourceLineRangeError("end_line 必须大于或等于 start_line")
 
         bounded_end_line = min(end_line, start_line + max_lines - 1)
@@ -102,10 +101,16 @@ class RepositorySourceReader:
         else:
             candidate_path = (self._repository_path / raw_path).resolve()
         try:
+            # resolve 后再 relative_to，可以同时拦截绝对路径和 `..` 逃逸。
             candidate_path.relative_to(self._repository_path)
         except ValueError as error:
             raise SourcePathError("源码路径必须位于当前仓库内") from error
         return candidate_path
+
+
+def _ensure_positive_int(value: object, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise SourceLineRangeError(f"{name} 必须大于 0")
 
 
 class RigelGraphReader:
@@ -170,7 +175,7 @@ class RigelGraphReader:
             {"visible_node_types": list(VISIBLE_NODE_TYPES), "limit": limit},
         )
         nodes = [_format_node(node_id, properties) for node_id, properties in node_rows]
-        node_ids = [str(node["id"]) for node in nodes]
+        node_ids = [node["id"] for node in nodes]
         if not node_ids:
             return {"nodes": [], "edges": []}
 
@@ -234,7 +239,7 @@ class RigelGraphReader:
                     "score": score,
                     "summary": _format_summary(summary_id, summary_properties),
                     "node": node,
-                    "related": self.related_nodes(str(target_id), limit=expansion_limit),
+                    "related": self.related_nodes(target_id, limit=expansion_limit),
                 }
             )
 
@@ -258,6 +263,7 @@ class RigelGraphReader:
     ) -> dict[str, object]:
         """组装 Agent 可直接引用的结构化图谱上下文。"""
 
+        # Agent 工具接口不生成自然语言答案，只返回可追溯的图谱证据和源码切片。
         recall_results = self.recall(
             query_embedding,
             embedding_model=embedding_model,
@@ -377,10 +383,10 @@ class RigelGraphReader:
         for source_id, source_properties, target_id, target_properties, edge_type, edge_properties in rows:
             source_node = _format_node(source_id, source_properties)
             target_node = _format_node(target_id, target_properties)
-            related_node = target_node if str(source_id) == node_id else source_node
+            related_node = target_node if source_id == node_id else source_node
             relations.append(
                 {
-                    "direction": "outgoing" if str(source_id) == node_id else "incoming",
+                    "direction": "outgoing" if source_id == node_id else "incoming",
                     "edge": _format_edge(source_id, target_id, edge_type, edge_properties),
                     "node": related_node,
                 }
@@ -440,6 +446,7 @@ class RigelGraphReader:
                 return None
             if node["type"] == "File":
                 return _format_source_file(node)
+            # 实体没有直接保存文件路径，沿 CONTAINS 父链回溯到最近的 File 节点。
             current_node_id = self._parent_node_id(current_node_id)
         return None
 
@@ -478,12 +485,8 @@ def _source_slices_for_anchors(
 ) -> list[dict[str, object]]:
     source_slices: list[dict[str, object]] = []
     for anchor in anchors[:DEFAULT_CONTEXT_SOURCE_SLICE_LIMIT]:
-        source_file = anchor.get("source_file")
-        if not isinstance(source_file, dict):
-            continue
-        relative_path = _read_property(source_file, "relative_path")
-        if not relative_path:
-            continue
+        source_file = cast(dict[str, object], anchor["source_file"])
+        relative_path = cast(str, source_file["relative_path"])
         try:
             source_slice = source_reader.read_slice(
                 relative_path,
@@ -510,13 +513,11 @@ def _source_slices_for_anchors(
 
 
 def _visible_edge_types(edge_types: list[str]) -> list[str]:
-    visible_edge_types = [edge_type for edge_type in edge_types if edge_type in VISIBLE_EDGE_TYPES]
-    return visible_edge_types or list(VISIBLE_EDGE_TYPES)
+    return edge_types
 
 
 def _read_property(properties: Mapping[str, object], name: str) -> str:
-    value = properties.get(name)
-    return value if isinstance(value, str) else ""
+    return cast(str, properties[name])
 
 
 def _format_node(node_id: str, properties: Mapping[str, object]) -> dict[str, object]:
@@ -562,10 +563,9 @@ def _format_anchor(
     edge_properties: Mapping[str, object],
     source_file: dict[str, object] | None,
 ) -> dict[str, object]:
-    role = _read_property(edge_properties, "role") or _read_property(anchor_properties, "role")
     return {
         "id": anchor_id,
-        "role": role,
+        "role": _read_property(edge_properties, "role"),
         "start_line": _read_int_property(anchor_properties, "start_line"),
         "start_col": _read_int_property(anchor_properties, "start_col"),
         "end_line": _read_int_property(anchor_properties, "end_line"),
@@ -599,24 +599,27 @@ def _anchor_role_priority(role: str) -> int:
     priorities = {
         "definition": 0,
         "body": 1,
+        "name": 2,
     }
-    return priorities.get(role, 99)
+    return priorities[role]
 
 
 def _read_int_property(properties: Mapping[str, object], name: str) -> int:
-    value = properties.get(name)
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    return cast(int, properties[name])
 
 
-def _cosine_distance_to_similarity(distance: object) -> float:
-    if isinstance(distance, bool) or not isinstance(distance, int | float):
-        return 0.0
+def _cosine_distance_to_similarity(distance: float) -> float:
     return max(0.0, 1.0 - float(distance))
 
 
 def _node_label(node_id: str, properties: Mapping[str, object]) -> str:
-    for key in ("display_name", "qualified_name", "relative_path", "name"):
-        value = properties.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return node_id
+    node_type = _read_property(properties, "rigel_type")
+    label_properties = {
+        "Repository": "name",
+        "Module": "name",
+        "File": "relative_path",
+        "Entity": "display_name",
+        "Anchor": "role",
+        "Summary": "text",
+    }
+    return _read_property(properties, label_properties[node_type])

@@ -2,7 +2,7 @@ export interface ApiNode {
   id: string;
   type: string;
   label: string;
-  properties: Record<string, unknown>;
+  properties: ApiNodeProperties;
 }
 
 export interface ApiEdge {
@@ -11,6 +11,13 @@ export interface ApiEdge {
   target: string;
   type: string;
   properties: Record<string, unknown>;
+}
+
+export interface ApiNodeProperties extends Record<string, unknown> {
+  qualified_name?: string;
+  relative_path?: string;
+  start_line?: number;
+  end_line?: number;
 }
 
 export interface ApiGraph {
@@ -32,29 +39,6 @@ export interface ApiSummary {
 export interface ApiSummaryResponse {
   status: string;
   summary: ApiSummary;
-}
-
-export interface ApiRecallResult {
-  score: number;
-  summary: {
-    id: string;
-    text: string;
-    summary_model: string;
-    embedding_model: string;
-    embedding_dimensions: number;
-    source_hash: string;
-  };
-  node: ApiNode;
-  related: Array<{
-    direction: 'incoming' | 'outgoing';
-    edge: ApiEdge;
-    node: ApiNode;
-  }>;
-}
-
-export interface ApiRecallResponse {
-  status: string;
-  results: ApiRecallResult[];
 }
 
 export interface ApiChatMessage {
@@ -81,7 +65,6 @@ export interface ApiIndexResult {
   graph_node_count: number;
   graph_edge_count: number;
   duration_ms: number;
-  incremental_fallback: boolean;
 }
 
 export interface ApiIncrementalIndexResponse {
@@ -115,17 +98,6 @@ export interface GraphSummary {
   nodeTypes: Array<{ type: string; count: number }>;
 }
 
-export interface RecallResult {
-  score: number;
-  summary: string;
-  node: GraphNode;
-  related: Array<{
-    direction: 'incoming' | 'outgoing';
-    edgeType: string;
-    node: GraphNode;
-  }>;
-}
-
 export type ChatMessage = ApiChatMessage;
 
 export interface IndexResult {
@@ -140,7 +112,6 @@ export interface IndexResult {
   graphNodeCount: number;
   graphEdgeCount: number;
   durationMs: number;
-  incrementalFallback: boolean;
 }
 
 const NODE_TYPE_COLORS = [
@@ -212,23 +183,10 @@ export function adaptSummary(summary: ApiSummary): GraphSummary {
 export function adaptNode(node: ApiNode): GraphNode {
   return {
     id: node.id,
-    name: node.label || node.id,
-    group: node.type || 'Unknown',
-    color: colorForNodeType(node.type || 'Unknown'),
+    name: node.label,
+    group: node.type,
+    color: colorForNodeType(node.type),
     summary: formatNodeSummary(node),
-  };
-}
-
-export function adaptRecallResult(result: ApiRecallResult): RecallResult {
-  return {
-    score: result.score,
-    summary: result.summary.text,
-    node: adaptNode(result.node),
-    related: result.related.map((related) => ({
-      direction: related.direction,
-      edgeType: related.edge.type,
-      node: adaptNode(related.node),
-    })),
   };
 }
 
@@ -245,7 +203,6 @@ export function adaptIndexResult(result: ApiIndexResult): IndexResult {
     graphNodeCount: result.graph_node_count,
     graphEdgeCount: result.graph_edge_count,
     durationMs: result.duration_ms,
-    incrementalFallback: result.incremental_fallback,
   };
 }
 
@@ -258,8 +215,8 @@ function colorForNodeType(nodeType: string): string {
 }
 
 function formatNodeSummary(node: ApiNode): string {
-  const qualifiedName = readString(node.properties.qualified_name);
-  const relativePath = readString(node.properties.relative_path);
+  const qualifiedName = node.properties.qualified_name;
+  const relativePath = node.properties.relative_path;
   const lineRange = formatLineRange(node.properties.start_line, node.properties.end_line);
   const details = [qualifiedName, relativePath, lineRange].filter(Boolean);
 
@@ -270,18 +227,14 @@ function formatNodeSummary(node: ApiNode): string {
   return `${node.type}\n${details.join('\n')}`;
 }
 
-function formatLineRange(startLine: unknown, endLine: unknown): string {
-  if (typeof startLine !== 'number') {
+function formatLineRange(startLine: number | undefined, endLine: number | undefined): string {
+  if (startLine === undefined) {
     return '';
   }
-  if (typeof endLine !== 'number' || endLine === startLine) {
+  if (endLine === undefined || endLine === startLine) {
     return `第 ${startLine} 行`;
   }
   return `第 ${startLine}-${endLine} 行`;
-}
-
-function readString(value: unknown): string {
-  return typeof value === 'string' ? value : '';
 }
 
 async function readJson<T>(response: Response): Promise<T> {
