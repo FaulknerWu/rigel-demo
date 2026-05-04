@@ -3,6 +3,7 @@ from pathlib import Path
 from threading import Lock
 from tempfile import TemporaryDirectory
 from time import sleep
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -27,8 +28,8 @@ class RepositoryIndexerTest(TestCase):
             second_path.write_text("package demo; public class Second {}\n", encoding="utf-8")
             progress_events: list[tuple[str, int, int, str]] = []
 
-            with patch.object(repository_indexer, "enrich_java_semantic_edges") as enrich_java_semantic_edges:
-                enrich_java_semantic_edges.side_effect = lambda graph, *, request: graph
+            with patch.object(repository_indexer, "enrich_java_semantic_edges_with_report") as enrich_java_semantic_edges:
+                enrich_java_semantic_edges.side_effect = _add_fake_lsp_edge
 
                 repository_indexer.index_repository(
                     repository_path,
@@ -61,8 +62,8 @@ class RepositoryIndexerTest(TestCase):
                 encoding="utf-8",
             )
 
-            with patch.object(repository_indexer, "enrich_java_semantic_edges") as enrich_java_semantic_edges:
-                enrich_java_semantic_edges.side_effect = lambda graph, *, request: graph
+            with patch.object(repository_indexer, "enrich_java_semantic_edges_with_report") as enrich_java_semantic_edges:
+                enrich_java_semantic_edges.side_effect = _add_fake_lsp_edge
 
                 result = repository_indexer.index_repository(
                     repository_path,
@@ -72,7 +73,6 @@ class RepositoryIndexerTest(TestCase):
 
         self.assertEqual(result.indexed_file_count, 1)
         self.assertEqual(enrich_java_semantic_edges.call_count, 1)
-        self.assertNotIn("lsp_client", enrich_java_semantic_edges.call_args.kwargs)
         self.assertEqual(
             enrich_java_semantic_edges.call_args.kwargs["request"].lsp_timeout_seconds,
             DEFAULT_LSP_TIMEOUT_SECONDS,
@@ -99,8 +99,8 @@ class RepositoryIndexerTest(TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(source, encoding="utf-8")
 
-            with patch.object(repository_indexer, "enrich_java_semantic_edges") as enrich_java_semantic_edges:
-                enrich_java_semantic_edges.side_effect = lambda graph, *, request: graph
+            with patch.object(repository_indexer, "enrich_java_semantic_edges_with_report") as enrich_java_semantic_edges:
+                enrich_java_semantic_edges.side_effect = _add_fake_lsp_edge
 
                 result = repository_indexer.index_repository(
                     repository_path,
@@ -151,8 +151,8 @@ class RepositoryIndexerTest(TestCase):
                 "src/main/java/demo/Deleted.java": "sha256:deleted",
             }
 
-            with patch.object(repository_indexer, "enrich_java_semantic_edges") as enrich_java_semantic_edges:
-                enrich_java_semantic_edges.side_effect = lambda graph, **_kwargs: graph
+            with patch.object(repository_indexer, "enrich_java_semantic_edges_with_report") as enrich_java_semantic_edges:
+                enrich_java_semantic_edges.side_effect = _add_fake_lsp_edge
 
                 result = repository_indexer.index_repository_incremental(
                     repository_path,
@@ -185,6 +185,27 @@ class RepositoryIndexerTest(TestCase):
         self.assertTrue(changed_file_ids <= described_target_ids)
         self.assertEqual(enrich_java_semantic_edges.call_args.kwargs["source_file_paths"], {"src/main/java/demo/Added.java", "src/main/java/demo/Changed.java"})
         self.assertEqual(enrich_java_semantic_edges.call_args.kwargs["target_file_paths"], {"src/main/java/demo/Added.java", "src/main/java/demo/Changed.java"})
+
+    def test_index_repository_fails_when_lsp_adds_no_edges(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            source_path = repository_path / "src" / "main" / "java" / "demo" / "App.java"
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text("package demo; public class App {}\n", encoding="utf-8")
+
+            with patch.object(repository_indexer, "enrich_java_semantic_edges_with_report") as enrich_java_semantic_edges:
+                enrich_java_semantic_edges.return_value = SimpleNamespace(
+                    candidate_count=1,
+                    lsp_request_count=1,
+                    lsp_hit_count=0,
+                )
+
+                with self.assertRaisesRegex(repository_indexer.JavaSemanticEdgeFailure, "没有新增任何边"):
+                    repository_indexer.index_repository(
+                        repository_path,
+                        embedding_client=_FakeEmbeddingClient(),
+                        summary_client=_FakeSummaryClient(),
+                    )
 
     def test_incremental_index_without_changes_skips_model_clients(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -568,6 +589,27 @@ def _has_describes_edge(graph: GraphIR, summary_id: str, target_id: str) -> bool
         and edge.source_id == summary_id
         and edge.target_id == target_id
         for edge in graph.edges
+    )
+
+
+def _add_fake_lsp_edge(graph: GraphIR, **_kwargs: object) -> SimpleNamespace:
+    entity_ids = [node.id for node in graph.nodes if node.type == NodeType.ENTITY]
+    if entity_ids:
+        target_id = entity_ids[1] if len(entity_ids) >= 2 else entity_ids[0]
+        graph.add_edge(
+            GraphEdge.create(
+                EdgeType.DEPENDS_ON,
+                entity_ids[0],
+                target_id,
+                kind="calls",
+                provenance="lsp",
+                confidence=0.95,
+            )
+        )
+    return SimpleNamespace(
+        candidate_count=1,
+        lsp_request_count=1,
+        lsp_hit_count=1,
     )
 
 

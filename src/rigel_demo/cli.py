@@ -34,6 +34,7 @@ IndexMode = Literal["full", "incremental"]
 INDEX_PROGRESS_STAGE_LABELS = {
     "java_parse": "解析 Java 文件",
     "semantic_edges": "补全 Java 语义边",
+    "graph_stats": "图谱统计",
     "summary_text": "生成检索摘要",
     "summary_embedding": "生成摘要向量",
     "database_write": "写入图数据库",
@@ -335,7 +336,7 @@ def _handle_index_command(_args: argparse.Namespace) -> int:
             incremental=_args.incremental,
             progress_reporter=_print_repository_index_progress,
         )
-    except FileNotFoundError as error:
+    except (FileNotFoundError, RuntimeError) as error:
         print(str(error))
         return 1
 

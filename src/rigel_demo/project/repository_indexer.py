@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from rigel_demo.entities import Repository
-from rigel_demo.graph.ir import GraphEdge, GraphIR, NodeType
+from rigel_demo.graph.ir import EdgeType, GraphEdge, GraphIR, NodeType
 from rigel_demo.embedding import EmbeddingConfig, RigelEmbedding, build_rigel_embedding
 from rigel_demo.project.summaries import (
     SummaryProgress,
@@ -16,7 +16,7 @@ from rigel_demo.project.summaries import (
     SummaryTextClient,
     attach_retrieval_summaries,
 )
-from rigel_demo.java import JavaParseRequest, JavaSemanticEdgeRequest, enrich_java_semantic_edges, parse_java_file
+from rigel_demo.java import JavaParseRequest, JavaSemanticEdgeRequest, enrich_java_semantic_edges_with_report, parse_java_file
 from rigel_demo.project.incremental import (
     incremental_node_ids,
     java_file_changes,
@@ -32,10 +32,18 @@ from rigel_demo.llm import LLMConfig, LLMConfigSection, LangChainSummaryClient
 RepositoryIndexProgressStage = Literal[
     "java_parse",
     "semantic_edges",
+    "graph_stats",
     "summary_text",
     "summary_embedding",
     "database_write",
 ]
+
+LSP_PROVENANCE = "lsp"
+SEMANTIC_EDGE_TYPES = {EdgeType.DEPENDS_ON, EdgeType.SPECIALIZES, EdgeType.ALIASES}
+
+
+class JavaSemanticEdgeFailure(RuntimeError):
+    """Java LSP 没有产出任何可写入语义边。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +116,11 @@ def index_repository(
     )
 
     if structure_result.indexed_file_count > 0:
+        _report_graph_stats(
+            progress_reporter,
+            "结构图完成",
+            structure_result.graph,
+        )
         # 语义边需要跨文件视角，必须等所有文件的结构实体都进入同一个 GraphIR 后再补全。
         _report_progress(
             progress_reporter,
@@ -116,9 +129,11 @@ def index_repository(
             total=1,
             detail="全仓 Java 语义边",
         )
-        enrich_java_semantic_edges(
+        _enrich_java_semantic_edges_or_fail(
             structure_result.graph,
             request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
+            progress_reporter=progress_reporter,
+            phase_label="全仓 Java 语义边",
         )
     attach_retrieval_summaries(
         structure_result.graph,
@@ -178,11 +193,13 @@ def index_repository_incremental(
         total=1,
         detail="变更 Java 文件语义边",
     )
-    enrich_java_semantic_edges(
+    _enrich_java_semantic_edges_or_fail(
         full_graph,
         request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
         source_file_paths=changed_file_paths,
         target_file_paths=changed_file_paths,
+        progress_reporter=progress_reporter,
+        phase_label="变更 Java 文件语义边",
     )
 
     selected_node_ids = incremental_node_ids(full_graph, changed_file_paths)
@@ -241,6 +258,83 @@ def _build_java_structure_graph(
         _merge_graph(graph, file_graph)
 
     return JavaStructureGraphResult(graph=graph, indexed_file_count=len(targets))
+
+
+def _enrich_java_semantic_edges_or_fail(
+    graph: GraphIR,
+    *,
+    request: JavaSemanticEdgeRequest,
+    progress_reporter: RepositoryIndexProgressReporter | None,
+    phase_label: str,
+    source_file_paths: set[str] | None = None,
+    target_file_paths: set[str] | None = None,
+) -> None:
+    before = GraphCounts.from_graph(graph)
+    report = enrich_java_semantic_edges_with_report(
+        graph,
+        request=request,
+        source_file_paths=source_file_paths,
+        target_file_paths=target_file_paths,
+    )
+    after = GraphCounts.from_graph(graph)
+    lsp_added_edge_count = after.lsp_edge_count - before.lsp_edge_count
+
+    _report_progress(
+        progress_reporter,
+        stage="semantic_edges",
+        current=1,
+        total=1,
+        detail=(
+            f"{phase_label}统计：候选={report.candidate_count}，LSP请求={report.lsp_request_count}，"
+            f"LSP命中={report.lsp_hit_count}，新增边={after.edge_count - before.edge_count}，"
+            f"新增语义边={after.semantic_edge_count - before.semantic_edge_count}，新增LSP边={lsp_added_edge_count}"
+        ),
+    )
+    _report_graph_stats(progress_reporter, f"{phase_label}后", graph)
+
+    if lsp_added_edge_count == 0:
+        raise JavaSemanticEdgeFailure(
+            f"{phase_label}失败：Java 文件已进入语义补边阶段，但 LSP 没有新增任何边。"
+            f"候选={report.candidate_count}，LSP请求={report.lsp_request_count}，LSP命中={report.lsp_hit_count}。"
+            "请检查 Java/Gradle/JDTLS 配置后重新执行索引。"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GraphCounts:
+    """索引过程需要展示的图谱规模统计。"""
+
+    node_count: int
+    edge_count: int
+    semantic_edge_count: int
+    lsp_edge_count: int
+
+    @classmethod
+    def from_graph(cls, graph: GraphIR) -> "GraphCounts":
+        return cls(
+            node_count=len(graph.nodes),
+            edge_count=len(graph.edges),
+            semantic_edge_count=sum(1 for edge in graph.edges if edge.type in SEMANTIC_EDGE_TYPES),
+            lsp_edge_count=sum(1 for edge in graph.edges if edge.properties.get("provenance") == LSP_PROVENANCE),
+        )
+
+
+def _report_graph_stats(
+    progress_reporter: RepositoryIndexProgressReporter | None,
+    label: str,
+    graph: GraphIR,
+) -> None:
+    counts = GraphCounts.from_graph(graph)
+    _report_progress(
+        progress_reporter,
+        stage="graph_stats",
+        current=1,
+        total=1,
+        detail=(
+            f"{label}：节点={counts.node_count}，边={counts.edge_count}，"
+            f"语义边={counts.semantic_edge_count}，LSP边={counts.lsp_edge_count}"
+        ),
+    )
 
 
 def _summary_progress_reporter(

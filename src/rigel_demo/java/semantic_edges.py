@@ -64,6 +64,15 @@ class _SemanticCandidate:
     column: int
 
 
+@dataclass(frozen=True, slots=True)
+class JavaSemanticEdgeReport:
+    """Java 语义边补全过程的 LSP 解析统计。"""
+
+    candidate_count: int
+    lsp_request_count: int
+    lsp_hit_count: int
+
+
 def enrich_java_semantic_edges(
     graph: GraphIR,
     *,
@@ -78,18 +87,43 @@ def enrich_java_semantic_edges(
     使用 multilspy 启动 Java LSP。跨文件依赖只接受 LSP 定义跳转确认后的目标。
     """
 
+    enrich_java_semantic_edges_with_report(
+        graph,
+        request=request,
+        lsp_client=lsp_client,
+        source_file_paths=source_file_paths,
+        target_file_paths=target_file_paths,
+    )
+    return graph
+
+
+def enrich_java_semantic_edges_with_report(
+    graph: GraphIR,
+    *,
+    request: JavaSemanticEdgeRequest,
+    lsp_client: JavaLspClient | None = None,
+    source_file_paths: set[str] | None = None,
+    target_file_paths: set[str] | None = None,
+) -> JavaSemanticEdgeReport:
+    """补全 Java 跨文件语义边，并返回 LSP 解析统计。"""
+
     repository_root = Path(request.repository_root_path).resolve()
     graph_index = GraphIndex(graph)
     lsp_context = _started_lsp(repository_root, request.lsp_timeout_seconds) if lsp_client is None else nullcontext(lsp_client)
+    candidates = _collect_tree_sitter_candidates(
+        repository_root,
+        graph_index,
+        source_file_paths=source_file_paths,
+    )
+    lsp_request_count = 0
+    lsp_hit_count = 0
 
     with lsp_context as active_lsp:
         # 候选边先由 Tree-sitter 定位语法位置，再交给 LSP 解析真实目标，兼顾覆盖率和语义精度。
-        for candidate in _collect_tree_sitter_candidates(
-            repository_root,
-            graph_index,
-            source_file_paths=source_file_paths,
-        ):
-            target_entity = _resolve_lsp_target(active_lsp, repository_root, graph_index, candidate)
+        for candidate in candidates:
+            target_entity, request_count, hit_count = _resolve_lsp_target(active_lsp, repository_root, graph_index, candidate)
+            lsp_request_count += request_count
+            lsp_hit_count += hit_count
             if target_entity is not None and target_entity.node.id != candidate.source_entity_id:
                 _add_semantic_edge(
                     graph,
@@ -107,10 +141,20 @@ def enrich_java_semantic_edges(
             graph_index,
             target_file_paths=target_file_paths,
         )
+        reference_target_count = sum(
+            1
+            for target_entity in graph_index.entities
+            if target_file_paths is None or target_entity.file_path in target_file_paths
+        )
+        lsp_request_count += reference_target_count
         _add_override_edges(graph, graph_index)
         _add_alias_edges(graph, graph_index)
 
-    return graph
+    return JavaSemanticEdgeReport(
+        candidate_count=len(candidates),
+        lsp_request_count=lsp_request_count,
+        lsp_hit_count=lsp_hit_count,
+    )
 
 
 def _started_lsp(repository_root: Path, timeout_seconds: int) -> ContextManager[JavaLspClient]:
@@ -365,7 +409,7 @@ def _resolve_lsp_target(
     repository_root: Path,
     graph_index: GraphIndex,
     candidate: _SemanticCandidate,
-) -> EntityView | None:
+) -> tuple[EntityView | None, int, int]:
     column = _lsp_utf16_column(
         repository_root,
         candidate.file_path,
@@ -376,8 +420,8 @@ def _resolve_lsp_target(
     for location in locations:
         target_entity = graph_index.find_location_target(location)
         if target_entity is not None:
-            return target_entity
-    return None
+            return target_entity, 1, 1
+    return None, 1, 0
 
 
 def _lsp_locations(method: object, file_path: str, line: int, column: int) -> list[JsonObject]:
