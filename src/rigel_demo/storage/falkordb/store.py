@@ -17,6 +17,26 @@ from rigel_demo.graph.schema import (
     relationship_type,
 )
 
+@dataclass(frozen=True, slots=True)
+class DatabaseNodeProperties:
+    """写入 FalkorDB 的节点属性与可选原生向量。"""
+
+    scalar_properties: dict[str, object]
+    native_embedding: list[float] | None
+
+
+FILE_OWNED_METADATA_QUERY = """
+MATCH (file:RigelNode:File)
+WHERE file.relative_path IN $relative_paths
+MATCH (file)-[:CONTAINS*0..]->(owner:RigelNode)
+OPTIONAL MATCH (owner)-[:HAS_ANCHOR]->(anchor:RigelNode:Anchor)
+OPTIONAL MATCH (summary:RigelNode:Summary)-[:DESCRIBES]->(owner)
+WITH collect(DISTINCT owner) + collect(DISTINCT anchor) + collect(DISTINCT summary) AS nodes
+UNWIND nodes AS node
+WITH DISTINCT node
+WHERE node IS NOT NULL
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class FalkorDBConfig:
@@ -86,16 +106,8 @@ class FalkorDBStore:
 
         parameters = {"relative_paths": relative_paths}
         deleted_count = self._graph.query(
-            """
-            MATCH (file:RigelNode:File)
-            WHERE file.relative_path IN $relative_paths
-            MATCH (file)-[:CONTAINS*0..]->(owner:RigelNode)
-            OPTIONAL MATCH (owner)-[:HAS_ANCHOR]->(anchor:RigelNode:Anchor)
-            OPTIONAL MATCH (summary:RigelNode:Summary)-[:DESCRIBES]->(owner)
-            WITH collect(DISTINCT owner) + collect(DISTINCT anchor) + collect(DISTINCT summary) AS nodes
-            UNWIND nodes AS node
-            WITH DISTINCT node
-            WHERE node IS NOT NULL
+            f"""
+            {FILE_OWNED_METADATA_QUERY}
             RETURN count(node)
             """,
             parameters,
@@ -103,16 +115,8 @@ class FalkorDBStore:
         node_count = int(deleted_count[0][0])
 
         self._graph.query(
-            """
-            MATCH (file:RigelNode:File)
-            WHERE file.relative_path IN $relative_paths
-            MATCH (file)-[:CONTAINS*0..]->(owner:RigelNode)
-            OPTIONAL MATCH (owner)-[:HAS_ANCHOR]->(anchor:RigelNode:Anchor)
-            OPTIONAL MATCH (summary:RigelNode:Summary)-[:DESCRIBES]->(owner)
-            WITH collect(DISTINCT owner) + collect(DISTINCT anchor) + collect(DISTINCT summary) AS nodes
-            UNWIND nodes AS node
-            WITH DISTINCT node
-            WHERE node IS NOT NULL
+            f"""
+            {FILE_OWNED_METADATA_QUERY}
             DELETE node
             """,
             parameters,
@@ -132,33 +136,22 @@ class FalkorDBStore:
         """写入或更新单个 GraphIR 节点。"""
 
         schema = node_schema(node.type)
-        raw_properties: JsonObject = {
-            "id": node.id,
-            "rigel_type": node.type.value,
-            **node.properties,
-        }
-        native_embedding = _summary_embedding(raw_properties) if schema.type_label == SUMMARY_NODE_LABEL else None
-        if native_embedding is not None:
-            # 向量字段必须以 FalkorDB vecf32 写入；不能走通用属性序列化，否则原生向量索引用不了。
-            raw_properties = dict(raw_properties)
-            raw_properties.pop(SUMMARY_EMBEDDING_PROPERTY, None)
-
-        properties = _database_properties(raw_properties)
+        database_properties = _database_node_properties(node)
         # node_type 来自 GraphIR 枚举，不接受外部输入；属性值统一走参数化绑定。
         self._graph.query(
             f"""
             MERGE (node:{schema.common_label}:{schema.type_label} {{id: $id}})
             SET node += $properties
             """,
-            {"id": node.id, "properties": properties},
+            {"id": node.id, "properties": database_properties.scalar_properties},
         )
-        if native_embedding is not None:
+        if database_properties.native_embedding is not None:
             self._graph.query(
                 f"""
                 MATCH (node:{schema.common_label}:{schema.type_label} {{id: $id}})
                 SET node.{SUMMARY_EMBEDDING_PROPERTY} = vecf32($embedding)
                 """,
-                {"id": node.id, "embedding": native_embedding},
+                {"id": node.id, "embedding": database_properties.native_embedding},
             )
 
     def upsert_edge(self, edge: GraphEdge) -> None:
@@ -236,6 +229,28 @@ def _database_properties(properties: JsonObject) -> dict[str, object]:
     """把 GraphIR 属性转换成 FalkorDB 可稳定保存的属性。"""
 
     return {key: _database_value(value) for key, value in properties.items()}
+
+
+def _database_node_properties(node: GraphNode) -> DatabaseNodeProperties:
+    raw_properties: JsonObject = {
+        "id": node.id,
+        "rigel_type": node.type.value,
+        **node.properties,
+    }
+    native_embedding = _summary_embedding(raw_properties) if node.type.value == SUMMARY_NODE_LABEL else None
+    if native_embedding is None:
+        return DatabaseNodeProperties(
+            scalar_properties=_database_properties(raw_properties),
+            native_embedding=None,
+        )
+
+    # 向量字段必须以 FalkorDB vecf32 写入；不能走通用属性序列化，否则原生向量索引用不了。
+    scalar_properties = dict(raw_properties)
+    scalar_properties.pop(SUMMARY_EMBEDDING_PROPERTY, None)
+    return DatabaseNodeProperties(
+        scalar_properties=_database_properties(scalar_properties),
+        native_embedding=native_embedding,
+    )
 
 
 def _database_value(value: JsonValue) -> object:

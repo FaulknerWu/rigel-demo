@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "tsx src/api/rigel.test.ts"
+    "test": "tsx src/api/rigel.test.ts && tsx src/components/graphPresentation.test.ts && tsx src/components/chatPresentation.test.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",

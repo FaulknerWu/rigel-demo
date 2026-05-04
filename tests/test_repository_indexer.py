@@ -4,9 +4,12 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
-from rigel_demo.graph import EdgeType, NodeType
+from rigel_demo.entities import Entity, Module, Summary
+from rigel_demo.graph import EdgeType, GraphEdge, NodeType
+from rigel_demo.graph.ir import GraphIR, GraphNode
 from rigel_demo.embedding import EmbeddingConfig, EmbeddingFormat
 from rigel_demo.project import repository_indexer
+from rigel_demo.project.summaries import attach_retrieval_summaries
 from rigel_demo.java.requests import DEFAULT_LSP_TIMEOUT_SECONDS, GENERATED_ZONE
 from rigel_demo.llm import LLMConfig, LLMConfigSection, LLMMessage
 
@@ -165,22 +168,159 @@ class RepositoryIndexerTest(TestCase):
         self.assertEqual(result.graph.nodes, [])
         self.assertEqual(result.graph.edges, [])
 
+    def test_attach_retrieval_summaries_skips_empty_target_set(self) -> None:
+        embedding_client = _FakeEmbeddingClient()
+        summary_client = _FakeSummaryClient()
+        graph = GraphIR()
+
+        result = attach_retrieval_summaries(
+            graph,
+            embedding_client=embedding_client,
+            summary_client=summary_client,
+        )
+
+        self.assertIs(result, graph)
+        self.assertEqual(embedding_client.text_batches, [])
+        self.assertEqual(summary_client.messages, [])
+
+    def test_attach_retrieval_summaries_skips_existing_summary_nodes(self) -> None:
+        embedding_client = _FakeEmbeddingClient()
+        summary_client = _FakeSummaryClient()
+        graph = GraphIR()
+        module = _demo_module()
+        summary = _retrieval_summary(module.module_id, text="已有摘要")
+        graph.add_node(module)
+        graph.add_node(summary)
+        graph.add_edge(_describes_edge(summary.summary_id, module.module_id))
+
+        result = attach_retrieval_summaries(
+            graph,
+            embedding_client=embedding_client,
+            summary_client=summary_client,
+        )
+
+        self.assertIs(result, graph)
+        self.assertEqual(embedding_client.text_batches, [])
+        self.assertEqual(summary_client.messages, [])
+        self.assertEqual([node.id for node in _summary_nodes(graph)], [summary.summary_id])
+
+    def test_attach_retrieval_summaries_repairs_missing_existing_summary_edge(self) -> None:
+        embedding_client = _FakeEmbeddingClient()
+        summary_client = _FakeSummaryClient()
+        graph = GraphIR()
+        module = _demo_module()
+        summary = _retrieval_summary(module.module_id, text="已有摘要")
+        graph.add_node(module)
+        graph.add_node(summary)
+
+        attach_retrieval_summaries(
+            graph,
+            embedding_client=embedding_client,
+            summary_client=summary_client,
+        )
+
+        self.assertEqual(embedding_client.text_batches, [])
+        self.assertEqual(summary_client.messages, [])
+        self.assertTrue(_has_describes_edge(graph, summary.summary_id, module.module_id))
+
+    def test_attach_retrieval_summaries_regenerates_stale_source_summary(self) -> None:
+        embedding_client = _FakeEmbeddingClient()
+        summary_client = _FakeSummaryClient()
+        graph = GraphIR()
+        entity = _demo_entity(semantic_hash="sha256:new")
+        stale_summary = _retrieval_summary(
+            entity.entity_id,
+            text="旧摘要",
+            source_hash="sha256:old",
+            embedding=[0.0, 1.0, 0.0],
+        )
+        graph.add_node(entity)
+        graph.add_node(stale_summary)
+        graph.add_edge(_describes_edge(stale_summary.summary_id, entity.entity_id))
+
+        attach_retrieval_summaries(
+            graph,
+            embedding_client=embedding_client,
+            summary_client=summary_client,
+        )
+
+        summary_nodes = _summary_nodes(graph)
+        self.assertEqual(len(summary_nodes), 1)
+        self.assertEqual(summary_nodes[0].properties["source_hash"], "sha256:new")
+        self.assertNotEqual(summary_nodes[0].properties["text"], "旧摘要")
+        self.assertEqual(len(embedding_client.text_batches), 1)
+        self.assertEqual(len(summary_client.messages), 1)
+
+    def test_attach_retrieval_summaries_regenerates_stale_model_summary(self) -> None:
+        embedding_client = _FakeEmbeddingClient()
+        summary_client = _FakeSummaryClient()
+        graph = GraphIR()
+        module = _demo_module()
+        stale_summary = _retrieval_summary(
+            module.module_id,
+            text="旧模型摘要",
+            summary_model="old-summary-model",
+        )
+        graph.add_node(module)
+        graph.add_node(stale_summary)
+
+        attach_retrieval_summaries(
+            graph,
+            embedding_client=embedding_client,
+            summary_client=summary_client,
+        )
+
+        summary_nodes = _summary_nodes(graph)
+        self.assertEqual(len(summary_nodes), 1)
+        self.assertEqual(summary_nodes[0].properties["summary_model"], "summary-model")
+        self.assertNotEqual(summary_nodes[0].properties["text"], "旧模型摘要")
+        self.assertEqual(len(embedding_client.text_batches), 1)
+        self.assertEqual(len(summary_client.messages), 1)
+
+    def test_attach_retrieval_summaries_regenerates_stale_embedding_dimensions(self) -> None:
+        embedding_client = _FakeEmbeddingClient(dimensions=4)
+        summary_client = _FakeSummaryClient()
+        graph = GraphIR()
+        module = _demo_module()
+        stale_summary = _retrieval_summary(
+            module.module_id,
+            text="旧维度摘要",
+        )
+        graph.add_node(module)
+        graph.add_node(stale_summary)
+
+        attach_retrieval_summaries(
+            graph,
+            embedding_client=embedding_client,
+            summary_client=summary_client,
+        )
+
+        summary_nodes = _summary_nodes(graph)
+        self.assertEqual(len(summary_nodes), 1)
+        self.assertEqual(summary_nodes[0].properties["embedding_dimensions"], 4)
+        self.assertNotEqual(summary_nodes[0].properties["text"], "旧维度摘要")
+        self.assertEqual(len(embedding_client.text_batches), 1)
+        self.assertEqual(len(summary_client.messages), 1)
+
 
 class _FakeEmbeddingClient:
-    def __init__(self) -> None:
+    def __init__(self, *, dimensions: int = 3) -> None:
+        self.dimensions = dimensions
         self.config = EmbeddingConfig(
             provider="openai",
             format=EmbeddingFormat.OPENAI_EMBEDDINGS,
             model="text-embedding-3-small",
             api_key="fake-key",
             base_url=None,
-            dimensions=3,
+            dimensions=dimensions,
             timeout_seconds=1,
             batch_size=8,
         )
+        self.text_batches: list[list[str]] = []
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        return [[1.0, 0.0, 0.0] for _text in texts]
+        self.text_batches.append(texts)
+        return [[1.0, *([0.0] * (self.dimensions - 1))] for _text in texts]
 
 
 class _FakeSummaryClient:
@@ -194,9 +334,79 @@ class _FakeSummaryClient:
             system_prompt="摘要提示",
             section=LLMConfigSection.SUMMARY,
         )
+        self.messages: list[list[LLMMessage]] = []
 
     def generate_reply(self, messages: list[LLMMessage]) -> str:
+        self.messages.append(messages)
         return f"模型摘要：{messages[-1].content[:20]}"
+
+
+def _demo_module() -> Module:
+    return Module(
+        module_id="module:demo:root",
+        name="root",
+        root_path=".",
+        ecosystem="maven",
+        zone="prod",
+    )
+
+
+def _demo_entity(*, semantic_hash: str) -> Entity:
+    return Entity(
+        entity_id="entity:demo:PaymentService",
+        entity_key="java:demo.PaymentService",
+        display_name="PaymentService",
+        qualified_name="demo.PaymentService",
+        kind_norm="class",
+        kind_raw="class_declaration",
+        origin="internal",
+        semantic_hash=semantic_hash,
+    )
+
+
+def _retrieval_summary(
+    target_node_id: str,
+    *,
+    text: str,
+    source_hash: str = "sha256:existing",
+    summary_model: str = "summary-model",
+    embedding_model: str = "text-embedding-3-small",
+    embedding: list[float] | None = None,
+) -> Summary:
+    resolved_embedding = embedding or [1.0, 0.0, 0.0]
+    return Summary(
+        summary_id=f"summary:{target_node_id}:retrieval",
+        text=text,
+        purpose="retrieval",
+        source_hash=source_hash,
+        summary_model=summary_model,
+        embedding_model=embedding_model,
+        embedding_dimensions=len(resolved_embedding),
+        embedding=resolved_embedding,
+    )
+
+
+def _describes_edge(summary_id: str, target_id: str) -> GraphEdge:
+    return GraphEdge.create(
+        EdgeType.DESCRIBES,
+        summary_id,
+        target_id,
+        kind="retrieval-summary",
+        confidence=1.0,
+    )
+
+
+def _summary_nodes(graph: GraphIR) -> list[GraphNode]:
+    return [node for node in graph.nodes if node.type == NodeType.SUMMARY]
+
+
+def _has_describes_edge(graph: GraphIR, summary_id: str, target_id: str) -> bool:
+    return any(
+        edge.type == EdgeType.DESCRIBES
+        and edge.source_id == summary_id
+        and edge.target_id == target_id
+        for edge in graph.edges
+    )
 
 
 def _hash(source: str) -> str:

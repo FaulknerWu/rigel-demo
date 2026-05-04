@@ -6,7 +6,13 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase
 
-from rigel_demo.embedding import EmbeddingConfig, EmbeddingConfigurationError, EmbeddingFormat, RigelEmbedding
+from rigel_demo.embedding import (
+    EmbeddingConfig,
+    EmbeddingConfigurationError,
+    EmbeddingFormat,
+    EmbeddingResponseError,
+    RigelEmbedding,
+)
 
 
 class EmbeddingConfigTest(TestCase):
@@ -59,17 +65,7 @@ class EmbeddingConfigTest(TestCase):
 class RigelEmbeddingTest(TestCase):
     def test_embed_texts_uses_openai_embeddings_request_shape(self) -> None:
         fake_client = _FakeOpenAIEmbeddingClient()
-        config = EmbeddingConfig(
-            provider="openai",
-            format=EmbeddingFormat.OPENAI_EMBEDDINGS,
-            model="text-embedding-3-small",
-            api_key="embedding-key",
-            base_url=None,
-            dimensions=512,
-            timeout_seconds=30,
-            batch_size=8,
-        )
-        embedding = RigelEmbedding(config, openai_client=fake_client)
+        embedding = RigelEmbedding(_embedding_config(), openai_client=fake_client)
 
         vectors = embedding.embed_texts(["PaymentService", "OrderRepository"])
 
@@ -84,6 +80,47 @@ class RigelEmbeddingTest(TestCase):
             },
         )
 
+    def test_embed_texts_rejects_duplicate_response_indexes(self) -> None:
+        fake_client = _FakeOpenAIEmbeddingClient(
+            response_data=[
+                SimpleNamespace(index=0, embedding=[1.0, 0.0, 0.0]),
+                SimpleNamespace(index=0, embedding=[0.0, 1.0, 0.0]),
+            ]
+        )
+        embedding = RigelEmbedding(_embedding_config(), openai_client=fake_client)
+
+        with self.assertRaisesRegex(EmbeddingResponseError, "索引"):
+            embedding.embed_texts(["PaymentService", "OrderRepository"])
+
+    def test_embed_texts_rejects_non_integer_response_index(self) -> None:
+        fake_client = _FakeOpenAIEmbeddingClient(
+            response_data=[
+                SimpleNamespace(index="0", embedding=[1.0, 0.0, 0.0]),
+            ]
+        )
+        embedding = RigelEmbedding(_embedding_config(), openai_client=fake_client)
+
+        with self.assertRaisesRegex(EmbeddingResponseError, "索引格式"):
+            embedding.embed_texts(["PaymentService"])
+
+    def test_embed_texts_rejects_blank_input_text(self) -> None:
+        fake_client = _FakeOpenAIEmbeddingClient()
+        embedding = RigelEmbedding(_embedding_config(), openai_client=fake_client)
+
+        with self.assertRaisesRegex(EmbeddingResponseError, "输入文本不能为空"):
+            embedding.embed_texts(["PaymentService", "   "])
+
+        self.assertEqual(fake_client.embeddings.request_body, {})
+
+    def test_embed_texts_strips_input_text_before_request(self) -> None:
+        fake_client = _FakeOpenAIEmbeddingClient()
+        embedding = RigelEmbedding(_embedding_config(), openai_client=fake_client)
+
+        vectors = embedding.embed_texts(["  PaymentService  ", "  OrderRepository  "])
+
+        self.assertEqual(vectors, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        self.assertEqual(fake_client.embeddings.request_body["input"], ["PaymentService", "OrderRepository"])
+
 
 def _write_embedding_config(repository_path: Path, config: dict[str, object]) -> Path:
     config_path = repository_path / ".rigel" / "config.json"
@@ -92,17 +129,33 @@ def _write_embedding_config(repository_path: Path, config: dict[str, object]) ->
     return repository_path
 
 
+def _embedding_config() -> EmbeddingConfig:
+    return EmbeddingConfig(
+        provider="openai",
+        format=EmbeddingFormat.OPENAI_EMBEDDINGS,
+        model="text-embedding-3-small",
+        api_key="embedding-key",
+        base_url=None,
+        dimensions=512,
+        timeout_seconds=30,
+        batch_size=8,
+    )
+
+
 class _FakeOpenAIEmbeddingClient:
-    def __init__(self) -> None:
-        self.embeddings = _FakeEmbeddingsResource()
+    def __init__(self, response_data: list[SimpleNamespace] | None = None) -> None:
+        self.embeddings = _FakeEmbeddingsResource(response_data)
 
 
 class _FakeEmbeddingsResource:
-    def __init__(self) -> None:
+    def __init__(self, response_data: list[SimpleNamespace] | None = None) -> None:
         self.request_body: dict[str, object] = {}
+        self.response_data = response_data
 
     def create(self, **request_body: object) -> SimpleNamespace:
         self.request_body = request_body
+        if self.response_data is not None:
+            return SimpleNamespace(data=self.response_data)
         return SimpleNamespace(
             data=[
                 SimpleNamespace(index=0, embedding=[1.0, 0.0, 0.0]),

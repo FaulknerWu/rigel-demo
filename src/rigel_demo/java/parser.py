@@ -168,12 +168,12 @@ def _create_type_record(
     )
     if body_node is not None:
         record.child_records.extend(
-            _extract_entity_records(
+            _child_entity_records(
                 body_node,
                 source_bytes,
                 package_name=package_name,
                 file_id=file_id,
-                parent_qualified_name=qualified_name,
+                qualified_name=qualified_name,
                 origin=origin,
             )
         )
@@ -211,16 +211,35 @@ def _create_method_record(
     )
     if body_node is not None:
         record.child_records.extend(
-            _extract_entity_records(
+            _child_entity_records(
                 body_node,
                 source_bytes,
                 package_name=package_name,
                 file_id=file_id,
-                parent_qualified_name=qualified_name,
+                qualified_name=qualified_name,
                 origin=origin,
             )
         )
     return record
+
+
+def _child_entity_records(
+    body_node: Node,
+    source_bytes: bytes,
+    *,
+    package_name: str,
+    file_id: str,
+    qualified_name: str,
+    origin: str,
+) -> list[_EntityRecord]:
+    return _extract_entity_records(
+        body_node,
+        source_bytes,
+        package_name=package_name,
+        file_id=file_id,
+        parent_qualified_name=qualified_name,
+        origin=origin,
+    )
 
 
 def _create_field_records(

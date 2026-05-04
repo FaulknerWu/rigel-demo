@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from rigel_demo.entities import Anchor, Entity, File, Module, Repository
 from rigel_demo.graph import EdgeType, GraphEdge, GraphIR
 from rigel_demo.embedding import EmbeddingConfig, EmbeddingConfigurationError, EmbeddingFormat
-from rigel_demo.project.summaries import attach_retrieval_summaries
+from rigel_demo.project.summaries import attach_retrieval_summaries, build_retrieval_summary
 from rigel_demo.llm import (
     DEFAULT_CHAT_SYSTEM_PROMPT,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
@@ -24,10 +24,61 @@ from rigel_demo.llm import (
 from rigel_demo.graphrag import GraphRAGReply, GraphRAGTrace
 from rigel_demo.query.service import RepositorySourceReader, RigelGraphReader, SourceLineRangeError
 from rigel_demo.storage.falkordb import FalkorDBConfig, FalkorDBStore
-from rigel_demo.web.app import create_app
+from rigel_demo.web.app import WorkspaceStateError, create_app
 
 
 class WebAppLLMTest(TestCase):
+    def test_create_app_requires_workspace_state_at_startup(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            repository_path.joinpath(".rigel", "rigel.json").unlink()
+
+            with self.assertRaisesRegex(WorkspaceStateError, "rigel index"):
+                create_app(
+                    repository_path,
+                    chat_client=_FakeGraphRAGChat(),
+                    embedding_client=fake_embedding,
+                )
+
+    def test_create_app_rejects_invalid_workspace_state_json(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            repository_path.joinpath(".rigel", "rigel.json").write_text("{", encoding="utf-8")
+
+            with self.assertRaisesRegex(WorkspaceStateError, "不是合法 JSON"):
+                create_app(
+                    repository_path,
+                    chat_client=_FakeGraphRAGChat(),
+                    embedding_client=fake_embedding,
+                )
+
+    def test_create_app_rejects_workspace_state_without_graph_name(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        invalid_states = [
+            "[]\n",
+            '{"graph_name": ""}\n',
+            '{"graph_name": "   "}\n',
+            '{"graph_name": 123}\n',
+        ]
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            state_path = repository_path / ".rigel" / "rigel.json"
+
+            for invalid_state in invalid_states:
+                with self.subTest(invalid_state=invalid_state):
+                    state_path.write_text(invalid_state, encoding="utf-8")
+                    with self.assertRaises(WorkspaceStateError):
+                        create_app(
+                            repository_path,
+                            chat_client=_FakeGraphRAGChat(),
+                            embedding_client=fake_embedding,
+                        )
+
     def test_create_app_requires_chat_config_at_startup(self) -> None:
         fake_embedding = _FakeEmbeddingClient()
         with TemporaryDirectory() as workspace:
@@ -103,6 +154,24 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(summary_index[3]["embedding"]["similarityFunction"], "cosine")
         self.assertTrue(any(row[0].startswith("summary:") for row in vector_rows))
 
+    def test_store_writes_summary_embedding_as_native_vector(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            database_path = _write_demo_graph(repository_path, fake_embedding)
+            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
+
+            rows = store.graph.query(
+                "MATCH (summary:RigelNode:Summary) RETURN summary.embedding LIMIT 1"
+            ).result_set
+            vector_rows = store.graph.query(
+                "CALL db.idx.vector.queryNodes('Summary', 'embedding', 1, vecf32([1.0, 0.0, 0.0])) "
+                "YIELD node, score RETURN node.id, score"
+            ).result_set
+
+        self.assertEqual(rows[0][0], [1.0, 0.0, 0.0])
+        self.assertTrue(vector_rows[0][0].startswith("summary:"))
+
     def test_source_reader_rejects_non_integer_line_ranges(self) -> None:
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)
@@ -141,6 +210,156 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(paths[0]["nodes"][0]["id"], "repo:demo")
         self.assertEqual(paths[0]["nodes"][-1]["id"], "entity:demo:PaymentService")
         self.assertEqual(completions[0]["label"], "PaymentService")
+
+    def test_expand_graph_keeps_direction_specific_related_node(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            database_path = _write_demo_graph(repository_path, fake_embedding)
+            graph_reader = RigelGraphReader(database_path=database_path, graph_name="rigel")
+
+            outgoing = graph_reader.expand_graph(
+                node_id="file:demo:src/main/java/demo/PaymentService.java",
+                direction="outgoing",
+                edge_types=["CONTAINS"],
+                limit=5,
+            )
+            incoming = graph_reader.expand_graph(
+                node_id="file:demo:src/main/java/demo/PaymentService.java",
+                direction="incoming",
+                edge_types=["CONTAINS"],
+                limit=5,
+            )
+
+        self.assertEqual(outgoing["relations"][0]["direction"], "outgoing")
+        self.assertEqual(outgoing["relations"][0]["node"]["id"], "entity:demo:PaymentService")
+        self.assertEqual(incoming["relations"][0]["direction"], "incoming")
+        self.assertEqual(incoming["relations"][0]["node"]["id"], "module:demo:root")
+
+    def test_expand_graph_filters_internal_edge_types(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            database_path = _write_demo_graph(repository_path, fake_embedding)
+            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
+            store.upsert_edge(
+                GraphEdge.create(
+                    EdgeType.DESCRIBES,
+                    "repo:demo",
+                    "module:demo:root",
+                    kind="test-internal-edge",
+                )
+            )
+            graph_reader = RigelGraphReader(database_path=database_path, graph_name="rigel")
+
+            expanded = graph_reader.expand_graph(
+                node_id="module:demo:root",
+                direction="incoming",
+                edge_types=["DESCRIBES"],
+                limit=5,
+            )
+
+        self.assertEqual(expanded["relations"], [])
+
+    def test_anchors_for_node_keeps_unknown_anchor_roles_last(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            database_path = _write_demo_graph(repository_path, fake_embedding)
+            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
+            extra_anchor = Anchor(
+                anchor_id="anchor:entity:demo:PaymentService:extra",
+                start_line=1,
+                start_col=1,
+                end_line=1,
+                end_col=10,
+                role="extra",
+            )
+            store.upsert_graph(
+                GraphIR(
+                    nodes=[extra_anchor.to_node()],
+                    edges=[
+                        GraphEdge.create(
+                            EdgeType.HAS_ANCHOR,
+                            "entity:demo:PaymentService",
+                            extra_anchor.anchor_id,
+                            role="extra",
+                        )
+                    ],
+                )
+            )
+            graph_reader = RigelGraphReader(database_path=database_path, graph_name="rigel")
+
+            anchor_payload = graph_reader.anchors_for_node("entity:demo:PaymentService")
+
+        self.assertIsNotNone(anchor_payload)
+        anchors = anchor_payload["anchors"]
+        self.assertEqual([anchor["role"] for anchor in anchors], ["definition", "body", "extra"])
+
+    def test_context_skips_source_slices_for_anchor_without_source_file(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            database_path = _write_demo_graph(repository_path, fake_embedding)
+            store = FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path)))
+            orphan_entity = Entity(
+                entity_id="entity:demo:DetachedService",
+                entity_key="java:demo.DetachedService",
+                display_name="DetachedService",
+                qualified_name="demo.DetachedService",
+                kind_norm="class",
+                kind_raw="class_declaration",
+                origin="internal",
+                semantic_hash="sha256:detached-service",
+            )
+            orphan_anchor = Anchor(
+                anchor_id="anchor:entity:demo:DetachedService:definition",
+                start_line=1,
+                start_col=1,
+                end_line=1,
+                end_col=10,
+                role="definition",
+            )
+            orphan_summary = build_retrieval_summary(
+                orphan_entity.to_node(),
+                text="PaymentService detached evidence",
+                summary_model="summary-model",
+                embedding_model=fake_embedding.config.model,
+                embedding=[1.0, 0.0, 0.0],
+            )
+            store.upsert_graph(
+                GraphIR(
+                    nodes=[orphan_entity.to_node(), orphan_anchor.to_node(), orphan_summary.to_node()],
+                    edges=[
+                        GraphEdge.create(
+                            EdgeType.HAS_ANCHOR,
+                            orphan_entity.entity_id,
+                            orphan_anchor.anchor_id,
+                            role="definition",
+                        ),
+                        GraphEdge.create(
+                            EdgeType.DESCRIBES,
+                            orphan_summary.summary_id,
+                            orphan_entity.entity_id,
+                            kind="retrieval-summary",
+                        ),
+                    ],
+                )
+            )
+            graph_reader = RigelGraphReader(database_path=database_path, graph_name="rigel")
+
+            context = graph_reader.context(
+                query="PaymentService",
+                query_embedding=[1.0, 0.0, 0.0],
+                embedding_model=fake_embedding.config.model,
+                limit=10,
+                expansion_limit=1,
+                source_reader=RepositorySourceReader(repository_path),
+            )
+
+        orphan_seed = next(seed for seed in context["seeds"] if seed["node"]["id"] == orphan_entity.entity_id)
+        self.assertIsNone(orphan_seed["source_file"])
+        self.assertEqual(orphan_seed["source_slices"], [])
 
     def test_chat_returns_graphrag_query_trace_when_graph_exists(self) -> None:
         fake_chat = _FakeGraphRAGChat(
@@ -183,6 +402,54 @@ class WebAppLLMTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["queries"], [])
         self.assertEqual(fake_chat.messages[0], LLMMessage(role="user", content="NoMatch"))
+
+    def test_chat_rejects_blank_message_content(self) -> None:
+        fake_chat = _FakeGraphRAGChat()
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, chat_client=fake_chat, embedding_client=fake_embedding))
+
+            response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "   "}]})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(fake_chat.messages, [])
+
+    def test_chat_validates_last_submitted_message_role_before_model_call(self) -> None:
+        fake_chat = _FakeGraphRAGChat()
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, chat_client=fake_chat, embedding_client=fake_embedding))
+
+            response = client.post(
+                "/api/chat",
+                json={
+                    "messages": [
+                        {"role": "user", "content": "PaymentService 做什么"},
+                        {"role": "assistant", "content": "上一轮回复"},
+                    ]
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "最后一条消息必须来自用户")
+        self.assertEqual(fake_chat.messages, [])
+
+    def test_chat_strips_message_content_before_model_call(self) -> None:
+        fake_chat = _FakeGraphRAGChat()
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            _write_demo_graph(repository_path, fake_embedding)
+            client = TestClient(create_app(repository_path, chat_client=fake_chat, embedding_client=fake_embedding))
+
+            response = client.post("/api/chat", json={"messages": [{"role": "user", "content": "  PaymentService 做什么  "}]})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(fake_chat.messages[0], LLMMessage(role="user", content="PaymentService 做什么"))
 
     def test_incremental_index_endpoint_returns_shared_result_payload(self) -> None:
         fake_embedding = _FakeEmbeddingClient()

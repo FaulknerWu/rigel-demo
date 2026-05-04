@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import json
+from json import JSONDecodeError
 from pathlib import Path
 from threading import Lock
-from typing import Literal, cast
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from rigel_demo.cli import (
-    FALKORDB_DATABASE_FILE_NAME,
-    RIGEL_WORKSPACE_DIRECTORY_NAME,
+    WorkspacePaths,
     WEB_STATIC_DIRECTORY_NAME,
-    WORKSPACE_STATE_FILE_NAME,
     database_artifact_exists,
     index_repository_workspace,
     index_result_payload,
@@ -47,10 +46,11 @@ def create_app(
 ) -> FastAPI:
     """创建基于当前仓库 `.rigel` 目录的 Web 演示应用。"""
 
-    resolved_repository_path = (repository_path or Path.cwd()).resolve()
-    workspace_path = resolved_repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
-    database_path = workspace_path / FALKORDB_DATABASE_FILE_NAME
-    state_path = workspace_path / WORKSPACE_STATE_FILE_NAME
+    workspace_paths = WorkspacePaths.from_repository(repository_path)
+    resolved_repository_path = workspace_paths.repository_path
+    workspace_path = workspace_paths.workspace_path
+    database_path = workspace_paths.database_path
+    state_path = workspace_paths.state_path
     static_frontend_path = workspace_path / WEB_STATIC_DIRECTORY_NAME
     static_assets_path = static_frontend_path / "assets"
     static_index_path = static_frontend_path / "index.html"
@@ -60,7 +60,6 @@ def create_app(
     active_chat_client = _resolve_chat_client(
         resolved_repository_path,
         chat_client,
-        database_path=database_path,
         graph_name=graph_name,
     )
     incremental_index_lock = Lock()
@@ -162,6 +161,14 @@ class ChatMessagePayload(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1)
 
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, content: str) -> str:
+        stripped_content = content.strip()
+        if not stripped_content:
+            raise ValueError("消息内容不能为空")
+        return stripped_content
+
 
 class ChatRequest(BaseModel):
     """聊天请求体。"""
@@ -169,10 +176,30 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessagePayload] = Field(min_length=1, max_length=50)
 
 
+class WorkspaceStateError(ValueError):
+    """Rigel 工作区索引状态文件无效。"""
+
+
 def _read_graph_name(state_path: Path) -> str:
     """读取索引状态中的图名称。"""
 
-    return cast(str, json.loads(state_path.read_text(encoding="utf-8"))["graph_name"])
+    if not state_path.exists():
+        raise WorkspaceStateError(f"未找到索引状态文件，请先执行 rigel index：{state_path}")
+
+    try:
+        state_document = json.loads(state_path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise WorkspaceStateError(f"读取索引状态文件失败：{state_path}") from error
+    except JSONDecodeError as error:
+        raise WorkspaceStateError(f"索引状态文件不是合法 JSON：{state_path}") from error
+
+    if not isinstance(state_document, dict):
+        raise WorkspaceStateError("索引状态文件根节点必须是 JSON 对象")
+
+    graph_name = state_document.get("graph_name")
+    if not isinstance(graph_name, str) or not graph_name.strip():
+        raise WorkspaceStateError("索引状态文件必须包含非空字符串字段：graph_name")
+    return graph_name.strip()
 
 
 def _ensure_database_exists(database_path: Path) -> None:
@@ -189,7 +216,6 @@ def _resolve_chat_client(
     repository_path: Path,
     provided_client: RigelChatService | None,
     *,
-    database_path: Path,
     graph_name: str,
 ) -> RigelChatService:
     if provided_client is not None:
@@ -239,5 +265,4 @@ def _to_llm_messages(messages: list[ChatMessagePayload]) -> list[LLMMessage]:
     return [
         LLMMessage(role=message.role, content=message.content)
         for message in messages
-        if message.content.strip()
     ]

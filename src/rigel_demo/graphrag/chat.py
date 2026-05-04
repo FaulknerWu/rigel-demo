@@ -143,14 +143,22 @@ def _litellm_model_name(config: LLMConfig) -> str:
 def _response_text(response: object) -> str:
     if isinstance(response, str):
         return response
-    if isinstance(response, dict):
-        value = response.get("response") or response.get("answer") or response.get("content")
-        if isinstance(value, str) and value.strip():
-            return value
-    value = getattr(response, "response", None) or getattr(response, "answer", None) or getattr(response, "content", None)
+
+    value = _response_text_value(response)
     if isinstance(value, str) and value.strip():
         return value
     raise RigelGraphRAGError("GraphRAG-SDK 响应缺少 response 文本")
+
+
+def _response_text_value(response: object) -> object:
+    for field_name in ("response", "answer", "content"):
+        if isinstance(response, dict):
+            value = response.get(field_name)
+        else:
+            value = getattr(response, field_name, None)
+        if value:
+            return value
+    return None
 
 
 def _response_traces(response: object) -> list[GraphRAGTrace]:

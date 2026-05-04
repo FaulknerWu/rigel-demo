@@ -172,61 +172,72 @@ def _walk_candidates(
     candidates: list[_SemanticCandidate],
 ) -> None:
     owner = graph_index.find_owner_entity(file_path, node.start_point.row + 1, node.start_point.column + 1)
-    owner_id = owner.node.id if owner is not None else None
+    if owner is not None:
+        candidates.extend(_node_semantic_candidates(node, source_entity_id=owner.node.id, file_path=file_path))
 
-    if owner_id is not None and node.type == "method_invocation":
-        name_node = node.child_by_field_name("name") or last_named_child(node, "identifier")
-        if name_node is not None:
-            candidates.append(
-                _candidate(
-                    owner_id,
-                    EdgeType.DEPENDS_ON,
-                    DEPENDENCY_CALL_KIND,
-                    file_path,
-                    name_node,
-                )
-            )
+    for child in node.named_children:
+        _walk_candidates(child, graph_index, file_path, candidates)
 
-    # 继承/实现会在专门分支生成 SPECIALIZES 边，这里排除这些容器以免同一类型同时产生依赖边。
-    if (
-        owner_id is not None
-        and node.type in TYPE_REFERENCE_NODE_KINDS
-        and not has_ancestor_until_declaration(node, INHERITANCE_CONTAINER_KINDS, DECLARATION_NODE_KINDS)
-    ):
+
+def _node_semantic_candidates(
+    node: Node,
+    *,
+    source_entity_id: str,
+    file_path: str,
+) -> list[_SemanticCandidate]:
+    candidates: list[_SemanticCandidate] = []
+    method_name_node = _method_invocation_name_node(node)
+    if method_name_node is not None:
         candidates.append(
             _candidate(
-                owner_id,
+                source_entity_id,
+                EdgeType.DEPENDS_ON,
+                DEPENDENCY_CALL_KIND,
+                file_path,
+                method_name_node,
+            )
+        )
+
+    if node.type not in TYPE_REFERENCE_NODE_KINDS:
+        return candidates
+
+    if not has_ancestor_until_declaration(node, INHERITANCE_CONTAINER_KINDS, DECLARATION_NODE_KINDS):
+        candidates.append(
+            _candidate(
+                source_entity_id,
                 EdgeType.DEPENDS_ON,
                 DEPENDENCY_TYPE_USE_KIND,
                 file_path,
                 node,
             )
         )
-
-    if owner_id is not None and has_parent(node, "superclass") and node.type in TYPE_REFERENCE_NODE_KINDS:
+    if has_parent(node, "superclass"):
         candidates.append(
             _candidate(
-                owner_id,
+                source_entity_id,
                 EdgeType.SPECIALIZES,
                 SPECIALIZES_EXTENDS_KIND,
                 file_path,
                 node,
             )
         )
-
-    if owner_id is not None and has_ancestor_until_declaration(node, {"super_interfaces", "extends_interfaces"}, DECLARATION_NODE_KINDS) and node.type in TYPE_REFERENCE_NODE_KINDS:
+    if has_ancestor_until_declaration(node, {"super_interfaces", "extends_interfaces"}, DECLARATION_NODE_KINDS):
         candidates.append(
             _candidate(
-                owner_id,
+                source_entity_id,
                 EdgeType.SPECIALIZES,
                 SPECIALIZES_IMPLEMENTS_KIND,
                 file_path,
                 node,
             )
         )
+    return candidates
 
-    for child in node.named_children:
-        _walk_candidates(child, graph_index, file_path, candidates)
+
+def _method_invocation_name_node(node: Node) -> Node | None:
+    if node.type != "method_invocation":
+        return None
+    return node.child_by_field_name("name") or last_named_child(node, "identifier")
 
 
 def _add_lsp_reference_edges(

@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { ArrowUp, Bot, Brain, Database, Plus, Search, Sparkles, User } from 'lucide-react';
+import { ArrowUp, Bot, Database, User } from 'lucide-react';
 import { sendChatMessage, type ApiGraphRAGQuery, type ChatMessage } from '../api/rigel';
+import { formatGraphRAGQuery, formatQueryArgs } from './chatPresentation';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -107,29 +108,17 @@ export default function ChatPanel() {
             }}
           ></textarea>
 
-          <div className="flex items-center justify-between px-1 pb-1">
-            <div className="flex items-center gap-3 px-2 text-slate-500">
-              <button className="transition-colors hover:text-slate-800" aria-label="智能分析模式"><Sparkles className="h-[20px] w-[20px]" /></button>
-              <button className="transition-colors hover:text-slate-800" aria-label="图谱搜索模式"><Search className="h-[20px] w-[20px]" /></button>
-              <button className="transition-colors hover:text-slate-800" aria-label="架构推理模式"><Brain className="h-[20px] w-[20px]" /></button>
-              <button className="transition-colors hover:text-slate-800" aria-label="图谱问答模式"><Database className="h-[20px] w-[20px]" /></button>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button className="flex h-8 w-8 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label="添加上下文">
-                <Plus className="h-6 w-6 stroke-[2.5]" />
-              </button>
-              <button
-                onClick={handleSend}
-                disabled={!input.trim() || isResponding}
-                className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
-                  input.trim() && !isResponding ? 'bg-black text-white' : 'bg-[#f4f4f4] text-[#c4c4c4]'
-                }`}
-                aria-label="发送消息"
-              >
-                <ArrowUp className="h-[18px] w-[18px] stroke-[2.5]" />
-              </button>
-            </div>
+          <div className="flex items-center justify-end px-1 pb-1">
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() || isResponding}
+              className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
+                input.trim() && !isResponding ? 'bg-black text-white' : 'bg-[#f4f4f4] text-[#c4c4c4]'
+              }`}
+              aria-label="发送消息"
+            >
+              <ArrowUp className="h-[18px] w-[18px] stroke-[2.5]" />
+            </button>
           </div>
         </div>
       </div>
@@ -142,16 +131,4 @@ function toChatMessage(message: Message): ChatMessage {
     role: message.role,
     content: message.content,
   };
-}
-
-function formatGraphRAGQuery(query: ApiGraphRAGQuery): string {
-  const summaryKeys = ['query', 'items'];
-  const summary = summaryKeys
-    .map((key) => query.args[key])
-    .find((value) => typeof value === 'string' && value.length > 0);
-  return summary ? `${query.name}: ${summary}` : query.name;
-}
-
-function formatQueryArgs(args: Record<string, unknown>): string {
-  return JSON.stringify(args);
 }

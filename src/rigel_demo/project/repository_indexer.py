@@ -76,6 +76,42 @@ class JavaFileIndexTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class JavaStructureGraphResult:
+    """Java 文件结构解析后的仓库级图谱。"""
+
+    graph: GraphIR
+    indexed_file_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class JavaFileChangeSet:
+    """增量索引中的 Java 文件变更分类。"""
+
+    added_files: list[str]
+    modified_files: list[str]
+    deleted_files: list[str]
+    skipped_files: list[str]
+
+    @property
+    def changed_existing_files(self) -> list[str]:
+        """需要重新解析和写入的新增或修改文件。"""
+
+        return self.added_files + self.modified_files
+
+    @property
+    def changed_existing_file_paths(self) -> set[str]:
+        """需要交给语义边补全器处理的新增或修改文件路径。"""
+
+        return set(self.changed_existing_files)
+
+    @property
+    def indexed_file_count(self) -> int:
+        """本次需要重新写入图谱的文件数量。"""
+
+        return len(self.changed_existing_files)
+
+
+@dataclass(frozen=True, slots=True)
 class RepositoryIndexResult:
     """仓库索引结果。"""
 
@@ -116,37 +152,27 @@ def index_repository(
     active_summary_client = summary_client or RigelLLM(
         LLMConfig.from_repository(resolved_repository_path, LLMConfigSection.SUMMARY)
     )
-    repository_name = resolved_repository_path.name
-    graph = _base_graph(repository_name)
-    indexed_file_count = 0
+    structure_result = _build_java_structure_graph(
+        repository_name=resolved_repository_path.name,
+        targets=_iter_java_targets(resolved_repository_path),
+    )
 
-    # 单文件解析会各自产生 Repository/Module 节点，合并时按 id 去重以保留解析器的自包含输出。
-    for target in _iter_java_targets(resolved_repository_path):
-        request = JavaParseRequest(
-            repository_name=repository_name,
-            module_name=target.module_name,
-            module_root_path=target.module_root_path,
-            module_ecosystem=target.module_ecosystem,
-            zone=target.module_zone,
-            file_zone=target.file_zone,
-        )
-        file_graph = parse_java_file(target.source_path.read_bytes(), target.relative_path, request=request)
-        _merge_graph(graph, file_graph)
-        indexed_file_count += 1
-
-    if indexed_file_count > 0:
+    if structure_result.indexed_file_count > 0:
         # 语义边需要跨文件视角，必须等所有文件的结构实体都进入同一个 GraphIR 后再补全。
         enrich_java_semantic_edges(
-            graph,
+            structure_result.graph,
             request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
         )
     attach_retrieval_summaries(
-        graph,
+        structure_result.graph,
         embedding_client=active_embedding_client,
         summary_client=active_summary_client,
     )
 
-    return RepositoryIndexResult(graph=graph, indexed_file_count=indexed_file_count)
+    return RepositoryIndexResult(
+        graph=structure_result.graph,
+        indexed_file_count=structure_result.indexed_file_count,
+    )
 
 
 def index_repository_incremental(
@@ -159,34 +185,16 @@ def index_repository_incremental(
     """构建新增和修改 Java 文件对应的可写入增量图谱。"""
 
     resolved_repository_path = repository_path.resolve()
-    repository_name = resolved_repository_path.name
     targets = _iter_java_targets(resolved_repository_path)
-    current_file_hashes = _current_file_hashes(targets)
+    file_changes = _java_file_changes(targets, previous_file_hashes)
 
-    current_paths = set(current_file_hashes)
-    previous_paths = set(previous_file_hashes)
-    # 增量索引以文件哈希为边界：删除由存量数据库清理，新增/修改才需要重新解析和写入。
-    added_files = sorted(current_paths - previous_paths)
-    modified_files = sorted(
-        path
-        for path in current_paths & previous_paths
-        if current_file_hashes[path] != previous_file_hashes[path]
-    )
-    deleted_files = sorted(previous_paths - current_paths)
-    skipped_files = sorted(
-        path
-        for path in current_paths & previous_paths
-        if current_file_hashes[path] == previous_file_hashes[path]
-    )
-    changed_existing_files = added_files + modified_files
-
-    if not changed_existing_files:
+    if not file_changes.changed_existing_files:
         return RepositoryIncrementalIndexResult(
             graph=GraphIR(),
-            added_files=added_files,
-            modified_files=modified_files,
-            deleted_files=deleted_files,
-            skipped_files=skipped_files,
+            added_files=file_changes.added_files,
+            modified_files=file_changes.modified_files,
+            deleted_files=file_changes.deleted_files,
+            skipped_files=file_changes.skipped_files,
             indexed_file_count=0,
         )
 
@@ -197,21 +205,12 @@ def index_repository_incremental(
         LLMConfig.from_repository(resolved_repository_path, LLMConfigSection.SUMMARY)
     )
 
-    full_graph = _base_graph(repository_name)
     # 语义边依赖全仓实体索引；即使最终只写入变更文件，也需要用完整结构图解析跨文件目标。
-    for target in targets:
-        request = JavaParseRequest(
-            repository_name=repository_name,
-            module_name=target.module_name,
-            module_root_path=target.module_root_path,
-            module_ecosystem=target.module_ecosystem,
-            zone=target.module_zone,
-            file_zone=target.file_zone,
-        )
-        file_graph = parse_java_file(target.source_path.read_bytes(), target.relative_path, request=request)
-        _merge_graph(full_graph, file_graph)
-
-    changed_file_paths = set(changed_existing_files)
+    full_graph = _build_java_structure_graph(
+        repository_name=resolved_repository_path.name,
+        targets=targets,
+    ).graph
+    changed_file_paths = file_changes.changed_existing_file_paths
     enrich_java_semantic_edges(
         full_graph,
         request=JavaSemanticEdgeRequest(repository_root_path=str(resolved_repository_path)),
@@ -236,11 +235,11 @@ def index_repository_incremental(
 
     return RepositoryIncrementalIndexResult(
         graph=_select_incremental_graph(full_graph, selected_node_ids),
-        added_files=added_files,
-        modified_files=modified_files,
-        deleted_files=deleted_files,
-        skipped_files=skipped_files,
-        indexed_file_count=len(changed_existing_files),
+        added_files=file_changes.added_files,
+        modified_files=file_changes.modified_files,
+        deleted_files=file_changes.deleted_files,
+        skipped_files=file_changes.skipped_files,
+        indexed_file_count=file_changes.indexed_file_count,
     )
 
 
@@ -249,6 +248,33 @@ def _base_graph(repository_name: str) -> GraphIR:
     repository = Repository(repo_id=f"repo:{repository_name}", name=repository_name)
     graph.add_node(repository)
     return graph
+
+
+def _build_java_structure_graph(
+    *,
+    repository_name: str,
+    targets: list[JavaFileIndexTarget],
+) -> JavaStructureGraphResult:
+    graph = _base_graph(repository_name)
+
+    # 单文件解析会各自产生 Repository/Module 节点，合并时按 id 去重以保留解析器的自包含输出。
+    for target in targets:
+        request = _java_parse_request(repository_name, target)
+        file_graph = parse_java_file(target.source_path.read_bytes(), target.relative_path, request=request)
+        _merge_graph(graph, file_graph)
+
+    return JavaStructureGraphResult(graph=graph, indexed_file_count=len(targets))
+
+
+def _java_parse_request(repository_name: str, target: JavaFileIndexTarget) -> JavaParseRequest:
+    return JavaParseRequest(
+        repository_name=repository_name,
+        module_name=target.module_name,
+        module_root_path=target.module_root_path,
+        module_ecosystem=target.module_ecosystem,
+        zone=target.module_zone,
+        file_zone=target.file_zone,
+    )
 
 
 def _iter_java_targets(repository_path: Path) -> list[JavaFileIndexTarget]:
@@ -359,6 +385,31 @@ def _current_file_hashes(targets: list[JavaFileIndexTarget]) -> dict[str, str]:
         target.relative_path: _content_hash(target.source_path.read_bytes())
         for target in targets
     }
+
+
+def _java_file_changes(
+    targets: list[JavaFileIndexTarget],
+    previous_file_hashes: dict[str, str],
+) -> JavaFileChangeSet:
+    current_file_hashes = _current_file_hashes(targets)
+    current_paths = set(current_file_hashes)
+    previous_paths = set(previous_file_hashes)
+    stable_paths = current_paths & previous_paths
+
+    return JavaFileChangeSet(
+        added_files=sorted(current_paths - previous_paths),
+        modified_files=sorted(
+            path
+            for path in stable_paths
+            if current_file_hashes[path] != previous_file_hashes[path]
+        ),
+        deleted_files=sorted(previous_paths - current_paths),
+        skipped_files=sorted(
+            path
+            for path in stable_paths
+            if current_file_hashes[path] == previous_file_hashes[path]
+        ),
+    )
 
 
 def _content_hash(content: bytes) -> str:

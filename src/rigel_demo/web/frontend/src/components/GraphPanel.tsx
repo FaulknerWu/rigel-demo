@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import { Maximize, RefreshCw, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
-import { fetchGraph, fetchSummary, runIncrementalIndex, type GraphData, type GraphSummary, type IndexResult } from '../api/rigel';
+import { fetchGraph, fetchSummary, runIncrementalIndex, type GraphData, type GraphSummary } from '../api/rigel';
+import { formatIndexResultMessage, graphNodeTooltipHtml } from './graphPresentation';
 
 const EMPTY_GRAPH: GraphData = { nodes: [], links: [] };
 const EMPTY_SUMMARY: GraphSummary = { nodeCount: 0, edgeCount: 0, nodeTypes: [] };
@@ -111,12 +112,7 @@ export default function GraphPanel() {
             linkDirectionalArrowLength={4}
             linkDirectionalArrowRelPos={1}
             linkCanvasObjectMode={() => 'after'}
-            nodeLabel={(node: any) => `
-              <div style="background-color: rgba(15, 23, 42, 0.95); color: #e2e8f0; padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1); max-width: 250px; font-family: ui-sans-serif, system-ui, sans-serif; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); backdrop-filter: blur(8px);">
-                <div style="font-weight: 600; color: #ffffff; margin-bottom: 6px; font-size: 13px;">${node.name}</div>
-                <div style="font-size: 11px; color: #94a3b8; white-space: pre-wrap; line-height: 1.5;">${node.summary}</div>
-              </div>
-            `}
+            nodeLabel={(node: any) => graphNodeTooltipHtml(node)}
             linkCanvasObject={(link: any, canvasContext: CanvasRenderingContext2D, globalScale: number) => {
               if (globalScale < 2.5) return;
 
@@ -252,33 +248,4 @@ export default function GraphPanel() {
       </div>
     </div>
   );
-}
-
-function formatIndexResultMessage(result: IndexResult): string {
-  const lines = [
-    '增量索引完成',
-    `模式：${result.modeLabel}`,
-    `新增文件：${result.addedFiles.length}`,
-    `修改文件：${result.modifiedFiles.length}`,
-    `删除文件：${result.deletedFiles.length}`,
-    `跳过文件：${result.skippedFileCount}`,
-    `删除旧节点：${result.deletedNodeCount}`,
-    `图谱规模：${result.graphNodeCount} 节点 / ${result.graphEdgeCount} 边`,
-    `耗时：${result.durationMs} ms`,
-  ];
-
-  for (const [label, files] of [
-    ['新增', result.addedFiles],
-    ['修改', result.modifiedFiles],
-    ['删除', result.deletedFiles],
-  ] as const) {
-    for (const file of files.slice(0, 5)) {
-      lines.push(`${label}：${file}`);
-    }
-    if (files.length > 5) {
-      lines.push(`${label}：另有 ${files.length - 5} 个文件`);
-    }
-  }
-
-  return lines.join('\n');
 }

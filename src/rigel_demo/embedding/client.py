@@ -89,7 +89,11 @@ class RigelEmbedding:
         if len(response_data) != len(texts):
             raise EmbeddingResponseError("Embedding 返回数量与输入数量不一致")
 
-        response_data.sort(key=lambda item: int(item.index))
+        response_data.sort(key=lambda item: _embedding_item_index(item))
+        returned_indexes = [_embedding_item_index(item) for item in response_data]
+        if returned_indexes != list(range(len(texts))):
+            raise EmbeddingResponseError("Embedding 返回索引与输入顺序不匹配")
+
         embeddings: list[list[float]] = []
         for item in response_data:
             raw_embedding = item.embedding
@@ -103,8 +107,20 @@ class RigelEmbedding:
 
 
 def _normalize_texts(texts: Sequence[str]) -> list[str]:
-    normalized_texts = [text.strip() for text in texts if text.strip()]
+    normalized_texts: list[str] = []
+    for text in texts:
+        normalized_text = text.strip()
+        if not normalized_text:
+            raise EmbeddingResponseError("Embedding 输入文本不能为空")
+        normalized_texts.append(normalized_text)
     return normalized_texts
+
+
+def _embedding_item_index(item: object) -> int:
+    index = getattr(item, "index", None)
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise EmbeddingResponseError("Embedding 返回索引格式不正确")
+    return index
 
 
 def _normalize_embedding(raw_embedding: list[object]) -> list[float]:

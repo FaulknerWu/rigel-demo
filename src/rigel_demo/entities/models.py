@@ -15,6 +15,10 @@ class Repository:
     repo_id: str
     name: str
 
+    def __post_init__(self) -> None:
+        _require_non_empty_string(self.repo_id, "Repository.repo_id")
+        _require_non_empty_string(self.name, "Repository.name")
+
     def to_node(self) -> GraphNode:
         return GraphNode(
             id=self.repo_id,
@@ -32,6 +36,13 @@ class Module:
     root_path: str
     ecosystem: str
     zone: str
+
+    def __post_init__(self) -> None:
+        _require_non_empty_string(self.module_id, "Module.module_id")
+        _require_non_empty_string(self.name, "Module.name")
+        _require_non_empty_string(self.root_path, "Module.root_path")
+        _require_non_empty_string(self.ecosystem, "Module.ecosystem")
+        _require_non_empty_string(self.zone, "Module.zone")
 
     def to_node(self) -> GraphNode:
         return GraphNode(
@@ -51,6 +62,14 @@ class File:
     zone: str
     content_hash: str
     position_encoding: str = "UTF-8"
+
+    def __post_init__(self) -> None:
+        _require_non_empty_string(self.file_id, "File.file_id")
+        _require_non_empty_string(self.relative_path, "File.relative_path")
+        _require_non_empty_string(self.language, "File.language")
+        _require_non_empty_string(self.zone, "File.zone")
+        _require_non_empty_string(self.content_hash, "File.content_hash")
+        _require_non_empty_string(self.position_encoding, "File.position_encoding")
 
     def to_node(self) -> GraphNode:
         return GraphNode(
@@ -103,6 +122,16 @@ class Anchor:
     end_col: int
     role: str
 
+    def __post_init__(self) -> None:
+        _require_non_empty_string(self.anchor_id, "Anchor.anchor_id")
+        _require_positive_int(self.start_line, "Anchor.start_line")
+        _require_positive_int(self.start_col, "Anchor.start_col")
+        _require_positive_int(self.end_line, "Anchor.end_line")
+        _require_positive_int(self.end_col, "Anchor.end_col")
+        _require_non_empty_string(self.role, "Anchor.role")
+        if (self.end_line, self.end_col) < (self.start_line, self.start_col):
+            raise ValueError("Anchor 结束位置必须大于或等于开始位置")
+
     def to_node(self) -> GraphNode:
         return GraphNode(
             id=self.anchor_id,
@@ -124,6 +153,17 @@ class Summary:
     embedding_dimensions: int
     embedding: list[float]
 
+    def __post_init__(self) -> None:
+        _require_non_empty_string(self.summary_id, "Summary.summary_id")
+        _require_non_empty_string(self.text, "Summary.text")
+        _require_non_empty_string(self.source_hash, "Summary.source_hash")
+        _require_non_empty_string(self.summary_model, "Summary.summary_model")
+        _require_non_empty_string(self.embedding_model, "Summary.embedding_model")
+        if self.purpose not in {"retrieval", "rollup"}:
+            raise ValueError("Summary.purpose 必须是 retrieval 或 rollup")
+        _require_positive_int(self.embedding_dimensions, "Summary.embedding_dimensions")
+        _validate_embedding(self.embedding, self.embedding_dimensions)
+
     def to_node(self) -> GraphNode:
         return GraphNode(
             id=self.summary_id,
@@ -142,3 +182,18 @@ def _dataclass_properties(model: object) -> JsonObject:
 def _require_non_empty_string(value: str, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} 必须是非空字符串")
+
+
+def _require_positive_int(value: int, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} 必须是整数")
+    if value <= 0:
+        raise ValueError(f"{field_name} 必须大于 0")
+
+
+def _validate_embedding(embedding: list[float], embedding_dimensions: int) -> None:
+    if len(embedding) != embedding_dimensions:
+        raise ValueError("Summary.embedding 长度必须等于 Summary.embedding_dimensions")
+    for value in embedding:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError("Summary.embedding 必须全部是数字")

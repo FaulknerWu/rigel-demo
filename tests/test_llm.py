@@ -13,6 +13,7 @@ from rigel_demo.llm import (
     LLMConfigSection,
     LLMConfigurationError,
     LLMMessage,
+    LLMResponseError,
     RigelLLM,
 )
 
@@ -212,6 +213,30 @@ class RigelLLMTest(TestCase):
                 "temperature": 0,
                 "max_completion_tokens": 300,
             },
+        )
+
+    def test_generate_reply_rejects_blank_message_content(self) -> None:
+        fake_client = _FakeOpenAIClient()
+        llm = RigelLLM(_config(), openai_client=fake_client)
+
+        with self.assertRaisesRegex(LLMResponseError, "消息内容不能为空"):
+            llm.generate_reply([LLMMessage(role="user", content="   ")])
+
+        self.assertEqual(fake_client.chat.completions.request_body, {})
+
+    def test_generate_reply_strips_messages_before_request(self) -> None:
+        fake_client = _FakeOpenAIClient()
+        llm = RigelLLM(_config(), openai_client=fake_client)
+
+        reply = llm.generate_reply([LLMMessage(role="user", content="  分析 Controller  ")])
+
+        self.assertEqual(reply, "Chat 回复")
+        self.assertEqual(
+            fake_client.chat.completions.request_body["messages"],
+            [
+                {"role": "system", "content": "系统提示"},
+                {"role": "user", "content": "分析 Controller"},
+            ],
         )
 
 

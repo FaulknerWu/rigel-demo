@@ -168,6 +168,11 @@ class CliWebConfigTest(TestCase):
             with self.assertRaisesRegex(WebConfigurationError, "web.port"):
                 WebConfig.from_repository(repository_path)
 
+    def test_web_config_missing_file_keeps_file_not_found_error(self) -> None:
+        with TemporaryDirectory() as workspace:
+            with self.assertRaisesRegex(FileNotFoundError, "rigel init"):
+                WebConfig.from_repository(Path(workspace))
+
     def test_web_command_uses_configured_server_options(self) -> None:
         with TemporaryDirectory() as workspace:
             repository_path = Path(workspace)

@@ -11,7 +11,7 @@ def read_package_name(root_node: Node, source_bytes: bytes) -> str:
     for child in root_node.named_children:
         if child.type != "package_declaration":
             continue
-        package_node = next((node for node in child.named_children if node.type in {"identifier", "scoped_identifier"}), None)
+        package_node = _qualified_name_node(child)
         return node_text(package_node, source_bytes) if package_node is not None else ""
     return ""
 
@@ -21,7 +21,7 @@ def read_imports(root_node: Node, source_bytes: bytes) -> dict[str, str]:
     for child in root_node.named_children:
         if child.type != "import_declaration":
             continue
-        import_node = next((node for node in child.named_children if node.type in {"identifier", "scoped_identifier"}), None)
+        import_node = _qualified_name_node(child)
         if import_node is None:
             continue
         qualified_name = node_text(import_node, source_bytes)
@@ -33,7 +33,7 @@ def find_import_node(root_node: Node, source_bytes: bytes, imported_name: str) -
     for child in root_node.named_children:
         if child.type != "import_declaration":
             continue
-        import_node = next((node for node in child.named_children if node.type in {"identifier", "scoped_identifier"}), None)
+        import_node = _qualified_name_node(child)
         if import_node is not None and node_text(import_node, source_bytes) == imported_name:
             return import_node
     return None
@@ -64,6 +64,17 @@ def has_ancestor_until_declaration(node: Node, ancestor_types: set[str], declara
 
 def node_text(node: Node, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8")
+
+
+def _qualified_name_node(node: Node) -> Node | None:
+    return next(
+        (
+            child
+            for child in node.named_children
+            if child.type in {"identifier", "scoped_identifier"}
+        ),
+        None,
+    )
 
 
 def normalize_path(path: str) -> str:

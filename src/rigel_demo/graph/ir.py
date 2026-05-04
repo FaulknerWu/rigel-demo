@@ -44,6 +44,9 @@ class GraphNode:
     type: NodeType
     properties: JsonObject
 
+    def __post_init__(self) -> None:
+        _require_non_empty_string(self.id, "GraphNode.id")
+
 
 @dataclass(frozen=True, slots=True)
 class GraphEdge:
@@ -56,7 +59,11 @@ class GraphEdge:
     properties: JsonObject = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        _require_non_empty_string(self.id, "GraphEdge.id")
+        _require_non_empty_string(self.source_id, "GraphEdge.source_id")
+        _require_non_empty_string(self.target_id, "GraphEdge.target_id")
         _edge_semantic_suffix(self.properties)
+        _validate_confidence(self.properties)
 
     @classmethod
     def create(
@@ -125,3 +132,18 @@ def _edge_semantic_suffix(properties: JsonObject) -> str:
             return value.strip()
         raise ValueError(f"GraphEdge.{property_name} 必须是非空字符串")
     raise ValueError("GraphEdge 必须包含非空 kind 或 role")
+
+
+def _require_non_empty_string(value: str, field_name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} 必须是非空字符串")
+
+
+def _validate_confidence(properties: JsonObject) -> None:
+    value = properties.get("confidence")
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("GraphEdge.confidence 必须是数字")
+    if value < 0 or value > 1:
+        raise ValueError("GraphEdge.confidence 必须在 0 到 1 之间")

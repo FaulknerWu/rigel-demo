@@ -433,39 +433,8 @@ class RigelGraphReader:
         """按方向和边类型读取指定节点的一跳邻接关系。"""
 
         normalized_edge_types = _visible_edge_types(edge_types)
-        if direction == "outgoing":
-            query = """
-            MATCH (source:RigelNode)-[edge]->(target:RigelNode)
-            WHERE source.id = $node_id
-              AND source.rigel_type IN $visible_node_types
-              AND target.rigel_type IN $visible_node_types
-              AND type(edge) IN $edge_types
-            RETURN source.id, properties(source), target.id, properties(target), type(edge), properties(edge)
-            LIMIT $limit
-            """
-        elif direction == "incoming":
-            query = """
-            MATCH (source:RigelNode)-[edge]->(target:RigelNode)
-            WHERE target.id = $node_id
-              AND source.rigel_type IN $visible_node_types
-              AND target.rigel_type IN $visible_node_types
-              AND type(edge) IN $edge_types
-            RETURN source.id, properties(source), target.id, properties(target), type(edge), properties(edge)
-            LIMIT $limit
-            """
-        else:
-            query = """
-            MATCH (source:RigelNode)-[edge]->(target:RigelNode)
-            WHERE (source.id = $node_id OR target.id = $node_id)
-              AND source.rigel_type IN $visible_node_types
-              AND target.rigel_type IN $visible_node_types
-              AND type(edge) IN $edge_types
-            RETURN source.id, properties(source), target.id, properties(target), type(edge), properties(edge)
-            LIMIT $limit
-            """
-
         rows = self._query(
-            query,
+            _expand_graph_query(direction),
             {
                 "node_id": node_id,
                 "visible_node_types": list(VISIBLE_NODE_TYPES),
@@ -473,18 +442,7 @@ class RigelGraphReader:
                 "limit": limit,
             },
         )
-        relations: list[dict[str, object]] = []
-        for source_id, source_properties, target_id, target_properties, edge_type, edge_properties in rows:
-            source_node = _format_node(source_id, source_properties)
-            target_node = _format_node(target_id, target_properties)
-            related_node = target_node if source_id == node_id else source_node
-            relations.append(
-                {
-                    "direction": "outgoing" if source_id == node_id else "incoming",
-                    "edge": _format_edge(source_id, target_id, edge_type, edge_properties),
-                    "node": related_node,
-                }
-            )
+        relations = [_format_graph_relation(row, origin_node_id=node_id) for row in rows]
         return {"node_id": node_id, "relations": relations}
 
     def _context_seed_from_recall_result(
@@ -579,8 +537,13 @@ def _source_slices_for_anchors(
 ) -> list[dict[str, object]]:
     source_slices: list[dict[str, object]] = []
     for anchor in anchors[:DEFAULT_CONTEXT_SOURCE_SLICE_LIMIT]:
-        source_file = cast(dict[str, object], anchor["source_file"])
-        relative_path = cast(str, source_file["relative_path"])
+        source_file_value = anchor.get("source_file")
+        if not isinstance(source_file_value, Mapping):
+            continue
+        source_file = dict(source_file_value)
+        relative_path = source_file.get("relative_path")
+        if not isinstance(relative_path, str) or not relative_path.strip():
+            continue
         try:
             source_slice = source_reader.read_slice(
                 relative_path,
@@ -607,7 +570,44 @@ def _source_slices_for_anchors(
 
 
 def _visible_edge_types(edge_types: list[str]) -> list[str]:
-    return edge_types
+    visible_edge_type_set = set(VISIBLE_EDGE_TYPES)
+    return [
+        edge_type
+        for edge_type in dict.fromkeys(edge_types)
+        if edge_type in visible_edge_type_set
+    ]
+
+
+def _expand_graph_query(direction: GraphExpansionDirection) -> str:
+    match direction:
+        case "outgoing":
+            node_filter = "source.id = $node_id"
+        case "incoming":
+            node_filter = "target.id = $node_id"
+        case _:
+            node_filter = "(source.id = $node_id OR target.id = $node_id)"
+
+    return f"""
+    MATCH (source:RigelNode)-[edge]->(target:RigelNode)
+    WHERE {node_filter}
+      AND source.rigel_type IN $visible_node_types
+      AND target.rigel_type IN $visible_node_types
+      AND type(edge) IN $edge_types
+    RETURN source.id, properties(source), target.id, properties(target), type(edge), properties(edge)
+    LIMIT $limit
+    """
+
+
+def _format_graph_relation(row: list[Any], *, origin_node_id: str) -> dict[str, object]:
+    source_id, source_properties, target_id, target_properties, edge_type, edge_properties = row
+    source_node = _format_node(source_id, source_properties)
+    target_node = _format_node(target_id, target_properties)
+    is_outgoing = source_id == origin_node_id
+    return {
+        "direction": "outgoing" if is_outgoing else "incoming",
+        "edge": _format_edge(source_id, target_id, edge_type, edge_properties),
+        "node": target_node if is_outgoing else source_node,
+    }
 
 
 def _read_property(properties: Mapping[str, object], name: str) -> str:
@@ -695,7 +695,7 @@ def _anchor_role_priority(role: str) -> int:
         "body": 1,
         "name": 2,
     }
-    return priorities[role]
+    return priorities.get(role, len(priorities))
 
 
 def _read_int_property(properties: Mapping[str, object], name: str) -> int:

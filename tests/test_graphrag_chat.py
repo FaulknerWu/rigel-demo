@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -41,13 +44,40 @@ class GraphRAGSDKChatServiceTest(TestCase):
         self.assertEqual(_litellm_model_name(_llm_config(model="gpt-5.2")), "openai/gpt-5.2")
         self.assertEqual(_litellm_model_name(_llm_config(model="openai/gpt-5.2")), "openai/gpt-5.2")
 
+    def test_send_messages_accepts_object_response_text(self) -> None:
+        fake_chat_session = _FakeChatSession(response=SimpleNamespace(answer="对象回复"))
+
+        with patch("rigel_demo.graphrag.chat._build_chat_session", return_value=fake_chat_session):
+            chat = GraphRAGSDKChatService(
+                config=_llm_config(),
+                graphrag_config=GraphRAGConfig(
+                    host="127.0.0.1",
+                    port=6379,
+                    username=None,
+                    password=None,
+                ),
+                graph_name="rigel",
+            )
+            reply = chat.send_messages([LLMMessage(role="user", content="PaymentService 做什么")])
+
+        self.assertEqual(reply.content, "对象回复")
+        self.assertEqual(reply.traces, [])
+
+    def test_config_missing_file_keeps_file_not_found_error(self) -> None:
+        with TemporaryDirectory() as workspace:
+            with self.assertRaisesRegex(FileNotFoundError, "rigel init"):
+                GraphRAGConfig.from_repository(Path(workspace))
+
 
 class _FakeChatSession:
-    def __init__(self) -> None:
+    def __init__(self, response: object | None = None) -> None:
         self.messages: list[str] = []
+        self.response = response
 
-    def send_message(self, message: str) -> dict[str, object]:
+    def send_message(self, message: str) -> object:
         self.messages.append(message)
+        if self.response is not None:
+            return self.response
         return {
             "response": "GraphRAG 回复",
             "cypher": "MATCH (entity:Entity) RETURN entity",

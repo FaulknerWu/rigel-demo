@@ -11,18 +11,26 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Sequence
 
+from rigel_demo.config_document import (
+    RIGEL_CONFIG_FILE_NAME,
+    RIGEL_WORKSPACE_DIRECTORY_NAME,
+    ConfigDocumentErrorMessages,
+    read_config_document,
+)
 from rigel_demo.llm.config import DEFAULT_CHAT_SYSTEM_PROMPT, DEFAULT_SUMMARY_SYSTEM_PROMPT
 
+if TYPE_CHECKING:
+    from rigel_demo.storage.falkordb.store import FalkorDBStore
 
-RIGEL_WORKSPACE_DIRECTORY_NAME = ".rigel"
-RIGEL_CONFIG_FILE_NAME = "config.json"
+
 FALKORDB_DATABASE_FILE_NAME = "falkordb.db"
 WORKSPACE_STATE_FILE_NAME = "rigel.json"
 WEB_STATIC_DIRECTORY_NAME = "web/static"
 DEFAULT_GRAPH_NAME = "rigel"
 WEB_CONFIG_SECTION_NAME = "web"
+IndexMode = Literal["full", "incremental"]
 DEFAULT_CONFIG_DOCUMENT = {
     "web": {
         "host": "127.0.0.1",
@@ -90,13 +98,36 @@ class IndexResult:
     indexed_file_count: int
     graph_node_count: int
     graph_edge_count: int
-    index_mode: str = "full"
+    index_mode: IndexMode = "full"
     added_files: tuple[str, ...] = ()
     modified_files: tuple[str, ...] = ()
     deleted_files: tuple[str, ...] = ()
     skipped_file_count: int = 0
     deleted_node_count: int = 0
     duration_ms: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspacePaths:
+    """Rigel 工作区相关路径。"""
+
+    repository_path: Path
+    workspace_path: Path
+    config_path: Path
+    database_path: Path
+    state_path: Path
+
+    @classmethod
+    def from_repository(cls, repository_path: Path | None = None) -> "WorkspacePaths":
+        resolved_repository_path = (repository_path or Path.cwd()).resolve()
+        workspace_path = resolved_repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
+        return cls(
+            repository_path=resolved_repository_path,
+            workspace_path=workspace_path,
+            config_path=workspace_path / RIGEL_CONFIG_FILE_NAME,
+            database_path=workspace_path / FALKORDB_DATABASE_FILE_NAME,
+            state_path=workspace_path / WORKSPACE_STATE_FILE_NAME,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,17 +165,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 def init_repository(repository_path: Path | None = None) -> InitResult:
     """在目标仓库创建 Rigel 本地工作目录。"""
 
-    resolved_repository_path = (repository_path or Path.cwd()).resolve()
-    workspace_path = resolved_repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
-    config_path = workspace_path / RIGEL_CONFIG_FILE_NAME
+    workspace_paths = WorkspacePaths.from_repository(repository_path)
 
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    config_created = _write_default_config_if_missing(config_path)
+    workspace_paths.workspace_path.mkdir(parents=True, exist_ok=True)
+    config_created = _write_default_config_if_missing(workspace_paths.config_path)
 
     return InitResult(
-        repository_path=str(resolved_repository_path),
-        workspace_path=str(workspace_path),
-        config_path=str(config_path),
+        repository_path=str(workspace_paths.repository_path),
+        workspace_path=str(workspace_paths.workspace_path),
+        config_path=str(workspace_paths.config_path),
         config_created=config_created,
     )
 
@@ -152,83 +181,16 @@ def init_repository(repository_path: Path | None = None) -> InitResult:
 def index_repository_workspace(repository_path: Path | None = None, *, incremental: bool = False) -> IndexResult:
     """扫描目标仓库并重建 Rigel 本地图数据库。"""
 
-    from rigel_demo.project.repository_indexer import index_repository, index_repository_incremental
-    from rigel_demo.storage.falkordb.store import FalkorDBConfig, FalkorDBStore
-
-    resolved_repository_path = (repository_path or Path.cwd()).resolve()
-    workspace_path = resolved_repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
-    config_path = workspace_path / RIGEL_CONFIG_FILE_NAME
-    database_path = workspace_path / FALKORDB_DATABASE_FILE_NAME
-    state_path = workspace_path / WORKSPACE_STATE_FILE_NAME
-
-    if not config_path.exists():
-        raise FileNotFoundError(f"未找到配置文件，请先执行 rigel init 并填写配置：{config_path}")
-
-    workspace_path.mkdir(parents=True, exist_ok=True)
+    workspace_paths = WorkspacePaths.from_repository(repository_path)
+    _ensure_workspace_config_exists(workspace_paths)
+    workspace_paths.workspace_path.mkdir(parents=True, exist_ok=True)
     started_at = perf_counter()
 
     if incremental:
-        if not database_artifact_exists(database_path):
-            raise FileNotFoundError(f"未找到可增量索引的图数据库，请先执行 rigel index：{database_path}")
-        # 增量模式复用旧数据库中的文件哈希，先删旧子图再写新子图，保持演示实现简单可观察。
-        store = FalkorDBStore.connect(
-            FalkorDBConfig(
-                graph_name=DEFAULT_GRAPH_NAME,
-                database_path=str(database_path),
-            )
-        )
-        index_result = index_repository_incremental(
-            resolved_repository_path,
-            previous_file_hashes=store.list_java_file_hashes(),
-        )
-        deleted_node_count = store.delete_file_subgraphs(
-            [*index_result.modified_files, *index_result.deleted_files]
-        )
-        if index_result.graph.nodes or index_result.graph.edges:
-            store.upsert_graph(index_result.graph)
-        graph_node_count, graph_edge_count = store.graph_counts()
-        result = IndexResult(
-            repository_path=str(resolved_repository_path),
-            workspace_path=str(workspace_path),
-            database_path=str(database_path),
-            state_path=str(state_path),
-            graph_name=DEFAULT_GRAPH_NAME,
-            indexed_file_count=index_result.indexed_file_count,
-            graph_node_count=graph_node_count,
-            graph_edge_count=graph_edge_count,
-            index_mode="incremental",
-            added_files=tuple(index_result.added_files),
-            modified_files=tuple(index_result.modified_files),
-            deleted_files=tuple(index_result.deleted_files),
-            skipped_file_count=len(index_result.skipped_files),
-            deleted_node_count=deleted_node_count,
-            duration_ms=_duration_ms(started_at),
-        )
-        _write_workspace_state(state_path, result)
-        return result
-
-    _remove_database_artifacts(database_path)
-    index_result = index_repository(resolved_repository_path)
-    FalkorDBStore.connect(
-        FalkorDBConfig(
-            graph_name=DEFAULT_GRAPH_NAME,
-            database_path=str(database_path),
-        )
-    ).upsert_graph(index_result.graph)
-
-    result = IndexResult(
-        repository_path=str(resolved_repository_path),
-        workspace_path=str(workspace_path),
-        database_path=str(database_path),
-        state_path=str(state_path),
-        graph_name=DEFAULT_GRAPH_NAME,
-        indexed_file_count=index_result.indexed_file_count,
-        graph_node_count=len(index_result.graph.nodes),
-        graph_edge_count=len(index_result.graph.edges),
-        index_mode="full",
-        duration_ms=_duration_ms(started_at),
-    )
-    _write_workspace_state(state_path, result)
+        result = _index_workspace_incrementally(workspace_paths, started_at=started_at)
+    else:
+        result = _index_workspace_fully(workspace_paths, started_at=started_at)
+    _write_workspace_state(workspace_paths.state_path, result)
     return result
 
 
@@ -283,6 +245,106 @@ def _handle_init_command(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _ensure_workspace_config_exists(workspace_paths: WorkspacePaths) -> None:
+    if not workspace_paths.config_path.exists():
+        raise FileNotFoundError(f"未找到配置文件，请先执行 rigel init 并填写配置：{workspace_paths.config_path}")
+
+
+def _connect_workspace_store(workspace_paths: WorkspacePaths) -> "FalkorDBStore":
+    from rigel_demo.storage.falkordb.store import FalkorDBConfig, FalkorDBStore
+
+    return FalkorDBStore.connect(
+        FalkorDBConfig(
+            graph_name=DEFAULT_GRAPH_NAME,
+            database_path=str(workspace_paths.database_path),
+        )
+    )
+
+
+def _index_workspace_fully(workspace_paths: WorkspacePaths, *, started_at: float) -> IndexResult:
+    from rigel_demo.project.repository_indexer import index_repository
+
+    _remove_database_artifacts(workspace_paths.database_path)
+    index_result = index_repository(workspace_paths.repository_path)
+    _connect_workspace_store(workspace_paths).upsert_graph(index_result.graph)
+
+    return _index_result(
+        workspace_paths,
+        indexed_file_count=index_result.indexed_file_count,
+        graph_node_count=len(index_result.graph.nodes),
+        graph_edge_count=len(index_result.graph.edges),
+        index_mode="full",
+        started_at=started_at,
+    )
+
+
+def _index_workspace_incrementally(workspace_paths: WorkspacePaths, *, started_at: float) -> IndexResult:
+    from rigel_demo.project.repository_indexer import index_repository_incremental
+
+    if not database_artifact_exists(workspace_paths.database_path):
+        raise FileNotFoundError(f"未找到可增量索引的图数据库，请先执行 rigel index：{workspace_paths.database_path}")
+
+    # 增量模式复用旧数据库中的文件哈希，先删旧子图再写新子图，保持演示实现简单可观察。
+    store = _connect_workspace_store(workspace_paths)
+    index_result = index_repository_incremental(
+        workspace_paths.repository_path,
+        previous_file_hashes=store.list_java_file_hashes(),
+    )
+    deleted_node_count = store.delete_file_subgraphs(
+        [*index_result.modified_files, *index_result.deleted_files]
+    )
+    if index_result.graph.nodes or index_result.graph.edges:
+        store.upsert_graph(index_result.graph)
+    graph_node_count, graph_edge_count = store.graph_counts()
+
+    return _index_result(
+        workspace_paths,
+        indexed_file_count=index_result.indexed_file_count,
+        graph_node_count=graph_node_count,
+        graph_edge_count=graph_edge_count,
+        index_mode="incremental",
+        added_files=tuple(index_result.added_files),
+        modified_files=tuple(index_result.modified_files),
+        deleted_files=tuple(index_result.deleted_files),
+        skipped_file_count=len(index_result.skipped_files),
+        deleted_node_count=deleted_node_count,
+        started_at=started_at,
+    )
+
+
+def _index_result(
+    workspace_paths: WorkspacePaths,
+    *,
+    indexed_file_count: int,
+    graph_node_count: int,
+    graph_edge_count: int,
+    index_mode: IndexMode,
+    started_at: float,
+    added_files: tuple[str, ...] = (),
+    modified_files: tuple[str, ...] = (),
+    deleted_files: tuple[str, ...] = (),
+    skipped_file_count: int = 0,
+    deleted_node_count: int = 0,
+) -> IndexResult:
+    return IndexResult(
+        repository_path=str(workspace_paths.repository_path),
+        workspace_path=str(workspace_paths.workspace_path),
+        database_path=str(workspace_paths.database_path),
+        state_path=str(workspace_paths.state_path),
+        graph_name=DEFAULT_GRAPH_NAME,
+        indexed_file_count=indexed_file_count,
+        graph_node_count=graph_node_count,
+        graph_edge_count=graph_edge_count,
+        index_mode=index_mode,
+        added_files=added_files,
+        modified_files=modified_files,
+        deleted_files=deleted_files,
+        skipped_file_count=skipped_file_count,
+        deleted_node_count=deleted_node_count,
+        duration_ms=_duration_ms(started_at),
+    )
+
+
 def _handle_index_command(_args: argparse.Namespace) -> int:
     """处理 index 命令。"""
 
@@ -324,36 +386,34 @@ def _handle_web_command(_args: argparse.Namespace) -> int:
 
     from rigel_demo.web.app import create_app
 
-    repository_path = Path.cwd().resolve()
-    workspace_path = repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME
-    database_path = repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME / FALKORDB_DATABASE_FILE_NAME
+    workspace_paths = WorkspacePaths.from_repository()
     try:
-        web_config = WebConfig.from_repository(repository_path)
+        web_config = WebConfig.from_repository(workspace_paths.repository_path)
     except (FileNotFoundError, WebConfigurationError) as error:
         print(str(error))
         return 1
 
-    if not database_artifact_exists(database_path):
-        print(f"未找到图数据库: {database_path}")
+    if not database_artifact_exists(workspace_paths.database_path):
+        print(f"未找到图数据库: {workspace_paths.database_path}")
         print("请先在目标仓库执行 rigel index。")
         return 1
 
-    frontend_result = build_frontend(workspace_path / WEB_STATIC_DIRECTORY_NAME)
+    frontend_result = build_frontend(workspace_paths.workspace_path / WEB_STATIC_DIRECTORY_NAME)
     if not frontend_result.success:
         print(frontend_result.message)
         return 1
 
     url = f"http://{web_config.host}:{web_config.port}"
     print("Rigel Web 演示后端已启动", flush=True)
-    print(f"仓库目录: {repository_path}", flush=True)
-    print(f"图数据库: {database_path}", flush=True)
+    print(f"仓库目录: {workspace_paths.repository_path}", flush=True)
+    print(f"图数据库: {workspace_paths.database_path}", flush=True)
     print(f"前端目录: {frontend_result.static_path}", flush=True)
     print(f"访问地址: {url}", flush=True)
     if web_config.open_browser:
         # 浏览器打开失败不影响后端启动；webbrowser 会按当前系统可用性自行处理。
         webbrowser.open(url)
 
-    uvicorn.run(create_app(repository_path), host=web_config.host, port=web_config.port)
+    uvicorn.run(create_app(workspace_paths.repository_path), host=web_config.host, port=web_config.port)
     return 0
 
 
@@ -499,20 +559,17 @@ def _remove_database_artifacts(database_path: Path) -> None:
 def _read_web_config(repository_path: Path) -> dict[str, Any]:
     """读取 `.rigel/config.json` 中的 Web 配置段。"""
 
-    config_path = repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME / RIGEL_CONFIG_FILE_NAME
-    if not config_path.exists():
-        raise FileNotFoundError(f"未找到配置文件，请先执行 rigel init 并填写配置：{config_path}")
-
-    try:
-        config_document = json.loads(config_path.read_text(encoding="utf-8"))
-    except OSError as error:
-        raise WebConfigurationError(f"读取 Web 配置文件失败：{config_path}") from error
-    except json.JSONDecodeError as error:
-        raise WebConfigurationError(f"Web 配置文件不是合法 JSON：{config_path}") from error
-
-    if not isinstance(config_document, dict):
-        raise WebConfigurationError("Web 配置文件根节点必须是 JSON 对象")
-
+    config_document = read_config_document(
+        repository_path,
+        messages=ConfigDocumentErrorMessages(
+            missing="未找到配置文件，请先执行 rigel init 并填写配置：{config_path}",
+            read="读取 Web 配置文件失败：{config_path}",
+            invalid_json="Web 配置文件不是合法 JSON：{config_path}",
+            root="Web 配置文件根节点必须是 JSON 对象",
+        ),
+        missing_error_type=FileNotFoundError,
+        error_type=WebConfigurationError,
+    )
     web_config = config_document.get(WEB_CONFIG_SECTION_NAME)
     if not isinstance(web_config, dict):
         raise WebConfigurationError(f"配置文件必须包含对象字段：{WEB_CONFIG_SECTION_NAME}")

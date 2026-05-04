@@ -97,8 +97,9 @@ def _normalize_messages(messages: Sequence[LLMMessage]) -> list[LLMMessage]:
     normalized_messages: list[LLMMessage] = []
     for message in messages:
         content = message.content.strip()
-        if content:
-            normalized_messages.append(LLMMessage(role=message.role, content=content))
+        if not content:
+            raise LLMResponseError("消息内容不能为空")
+        normalized_messages.append(LLMMessage(role=message.role, content=content))
     return normalized_messages
 
 
