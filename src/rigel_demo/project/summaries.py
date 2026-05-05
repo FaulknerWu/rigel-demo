@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from rigel_demo.entities import Summary
 from rigel_demo.graph.ir import EdgeType, GraphEdge, GraphIR, GraphNode, NodeType
 from rigel_demo.embedding import RigelEmbedding
 from rigel_demo.llm import LLMMessage
+from rigel_demo.prompts import build_summary_prompt
 
 RETRIEVAL_SUMMARY_PURPOSE = "retrieval"
 SUMMARY_DESCRIBES_KIND = "retrieval-summary"
@@ -297,7 +297,7 @@ def _generate_summary_texts(
 
 def _generate_summary_text(target_node: GraphNode, *, summary_client: SummaryTextClient) -> str:
     summary_text = _normalize_summary_text(
-        summary_client.generate_reply([LLMMessage(role="user", content=_summary_prompt(target_node))])
+        summary_client.generate_reply([LLMMessage(role="user", content=build_summary_prompt(target_node))])
     )
     if not summary_text:
         raise ValueError("Summary 模型返回空摘要")
@@ -358,56 +358,8 @@ def _summary_progress_detail(target_node: GraphNode) -> str:
     return target_node.id
 
 
-def _summary_prompt(target_node: GraphNode) -> str:
-    properties_json = json.dumps(target_node.properties, ensure_ascii=False, sort_keys=True, indent=2)
-    return (
-        "请为以下代码图谱节点生成一条用于向量召回的检索摘要。\n"
-        "写作要求：\n"
-        "1. 用一段中文自然语言完整记录节点类型、名称、路径或限定名、代码区域、语言和来源。\n"
-        "2. 说明该节点承担的职责、核心逻辑、对外提供的能力、构建或维护的数据/接口/流程。\n"
-        "3. 如果是 Java 类、接口、方法、字段或文件，结合 kind、qualified_name、display_name、"
-        "entity_key、relative_path 等属性写出用户可能搜索的业务词、技术词、简称和别名。\n"
-        "4. 对 controller、service、repository、configuration、model、dto、request、response、"
-        "test、generated 等常见角色要显式记录其角色含义；例如 admin controller 需要写明它负责"
-        "管理端接口、文章或内容管理等可由名称推断出的召回关键词。\n"
-        "5. 不要只复述文件路径；不要输出列表、Markdown 或解释；无法从属性确认的事实不要编造。\n\n"
-        f"节点类型：{target_node.type.value}\n"
-        f"节点 ID：{target_node.id}\n"
-        f"结构摘要：{_local_summary_text(target_node)}\n"
-        f"节点属性：\n{properties_json}"
-    )
-
-
 def _normalize_summary_text(text: str) -> str:
     return " ".join(line.strip() for line in text.splitlines() if line.strip())
-
-
-def _local_summary_text(target_node: GraphNode) -> str:
-    properties = target_node.properties
-    if target_node.type == NodeType.ENTITY:
-        return _join_summary_parts(
-            target_node.type.value,
-            cast(str, properties["kind_norm"]),
-            cast(str, properties["display_name"]),
-            cast(str, properties["qualified_name"]),
-            cast(str, properties["kind_raw"]),
-        )
-    if target_node.type == NodeType.FILE:
-        return _join_summary_parts(
-            target_node.type.value,
-            cast(str, properties["language"]),
-            cast(str, properties["relative_path"]),
-            cast(str, properties["zone"]),
-        )
-    if target_node.type == NodeType.MODULE:
-        return _join_summary_parts(
-            target_node.type.value,
-            cast(str, properties["name"]),
-            cast(str, properties["root_path"]),
-            cast(str, properties["ecosystem"]),
-            cast(str, properties["zone"]),
-        )
-    return _join_summary_parts(target_node.type.value, target_node.id)
 
 
 def _source_hash(target_node: GraphNode, text: str) -> str:
@@ -440,7 +392,3 @@ def _embedding_dimensions_from_config(config: SummaryClientConfig) -> int | None
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     return None
-
-
-def _join_summary_parts(*parts: str) -> str:
-    return " ".join(part for part in parts if part)

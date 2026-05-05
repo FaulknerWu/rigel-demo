@@ -7,9 +7,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
 from rigel_demo.graphrag.models import GraphRAGTrace
-from rigel_demo.graphrag.prompts import RIGEL_TOOL_SYSTEM_INSTRUCTION
 from rigel_demo.graphrag.state import GraphRAGState, ToolCall
 from rigel_demo.llm import LLMMessage
+from rigel_demo.prompts import (
+    EXPAND_NEIGHBORS_TOOL_DESCRIPTION,
+    QUERY_RELATION_TOOL_DESCRIPTION,
+    RIGEL_EVIDENCE_CONTINUATION_PROMPT,
+    RIGEL_TOOL_SYSTEM_INSTRUCTION,
+    VECTOR_SEARCH_SEEDS_TOOL_DESCRIPTION,
+)
 from rigel_demo.project.summaries import RETRIEVAL_SUMMARY_PURPOSE
 from rigel_demo.query.presentation import (
     format_edge,
@@ -48,30 +54,24 @@ def bind_tool_schemas(chat_model: Any) -> Any:
 def rigel_tools() -> list[Any]:
     from langchain_core.tools import tool
 
-    @tool
+    @tool(description=VECTOR_SEARCH_SEEDS_TOOL_DESCRIPTION)
     def vector_search_seeds(query_texts: list[str]) -> str:
-        """通过多条检索短句召回 Summary.embedding 候选，并用 Rerank 重排最相关的代码图谱种子节点。"""
-
         return ""
 
-    @tool
+    @tool(description=EXPAND_NEIGHBORS_TOOL_DESCRIPTION)
     def expand_neighbors(
         node_ids: list[str],
         direction: Literal["incoming", "outgoing", "both"] = "both",
         edge_types: list[str] | None = None,
     ) -> str:
-        """对已知节点做受控一跳邻接扩展，可按方向和可见边类型过滤。"""
-
         return ""
 
-    @tool
+    @tool(description=QUERY_RELATION_TOOL_DESCRIPTION)
     def query_relation(
         node_ids: list[str],
         relation_type: str,
         direction: Literal["incoming", "outgoing", "both"] = "both",
     ) -> str:
-        """沿单一可见关系类型查询已知节点的一跳关系。"""
-
         return ""
 
     return [vector_search_seeds, expand_neighbors, query_relation]
@@ -100,10 +100,7 @@ def agent_messages_with_evidence(state: GraphRAGState) -> list[Any]:
     from langchain_core.messages import SystemMessage
 
     evidence_message = SystemMessage(
-        content=(
-            "当前已累积图谱证据如下。若证据足够，请停止调用工具；若证据不足，请继续调用允许工具。\n"
-            f"{json_dumps(evidence_prompt_payload(state))}"
-        )
+        content=f"{RIGEL_EVIDENCE_CONTINUATION_PROMPT}\n{json_dumps(evidence_prompt_payload(state))}"
     )
     return [*state["agent_messages"], evidence_message]
 

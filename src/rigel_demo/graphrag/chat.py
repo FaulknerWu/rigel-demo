@@ -447,14 +447,14 @@ class LangGraphChatService:
         return relations
 
     def _generate_answer(self, state: GraphRAGState) -> dict[str, object]:
-        from rigel_demo.graphrag.prompts import RIGEL_QA_PROMPT, RIGEL_QA_SYSTEM_INSTRUCTION
+        from rigel_demo.prompts import RIGEL_QA_EVIDENCE_INSTRUCTION, RIGEL_QA_PROMPT
 
         if state.get("answer"):
             return {}
 
         response = self._chat_model.invoke(
             [
-                ("system", f"{self.config.system_prompt}\n\n{RIGEL_QA_SYSTEM_INSTRUCTION}"),
+                ("system", f"{self.config.system_prompt}\n\n{RIGEL_QA_EVIDENCE_INSTRUCTION}"),
                 (
                     "user",
                     RIGEL_QA_PROMPT.format(
