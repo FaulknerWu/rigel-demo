@@ -88,15 +88,8 @@ export default function GraphPanel() {
   };
 
   return (
-    <div className="relative flex h-full w-full flex-col overflow-hidden bg-[#020406] text-slate-300">
-      <div className="pointer-events-none absolute left-6 top-6 z-10 flex flex-col gap-3">
-        <div className="pointer-events-auto flex items-center gap-3 rounded-lg border border-white/5 bg-black/40 px-4 py-2 shadow-2xl backdrop-blur-xl">
-          <div className="flex h-6 w-6 items-center justify-center rounded-md border border-white/20 bg-white/10">
-            <div className="h-2 w-2 rotate-45 rounded-sm bg-white"></div>
-          </div>
-          <h1 className="text-base font-semibold uppercase tracking-wider text-white">Rigel</h1>
-        </div>
-      </div>
+    <div className="relative flex h-full w-full flex-col overflow-hidden bg-transparent text-slate-300">
+
 
       <div ref={containerRef} className="flex-1">
         {dimensions.width > 0 && dimensions.height > 0 && !isLoading && !errorMessage && graphData.nodes.length > 0 && (
@@ -106,9 +99,9 @@ export default function GraphPanel() {
             height={dimensions.height}
             graphData={graphData}
             nodeRelSize={12}
-            linkColor={() => 'rgba(255,255,255,0.4)'}
+            linkColor={() => 'rgba(255,255,255,0.2)'}
             linkWidth={1.5}
-            backgroundColor="#020406"
+            backgroundColor="#030509"
             linkDirectionalArrowLength={4}
             linkDirectionalArrowRelPos={1}
             linkCanvasObjectMode={() => 'after'}
@@ -141,7 +134,7 @@ export default function GraphPanel() {
               const textWidth = canvasContext.measureText(label).width;
               const backgroundDimensions = [textWidth, fontSize].map((dimension) => dimension + fontSize * 0.2);
 
-              canvasContext.fillStyle = '#020406';
+              canvasContext.fillStyle = '#030509';
               canvasContext.fillRect(-backgroundDimensions[0] / 2, -backgroundDimensions[1] / 2, backgroundDimensions[0], backgroundDimensions[1]);
               canvasContext.textAlign = 'center';
               canvasContext.textBaseline = 'middle';
@@ -183,67 +176,79 @@ export default function GraphPanel() {
       </div>
 
       {(isLoading || errorMessage || graphData.nodes.length === 0) && (
-        <div className="absolute inset-0 z-[5] flex items-center justify-center bg-[#020406]">
-          <div className="max-w-[320px] rounded-xl border border-white/5 bg-black/40 p-5 text-center backdrop-blur-md">
+        <div className="absolute inset-0 z-[5] flex items-center justify-center bg-[#030509]/80 backdrop-blur-sm">
+          <div className="max-w-[320px] rounded-2xl border border-white/10 bg-black/60 p-6 text-center shadow-2xl backdrop-blur-xl ring-1 ring-white/5">
             {isLoading ? (
               <>
-                <div className="mx-auto mb-4 h-10 w-10 animate-pulse rounded-full border border-white/10 bg-white/5"></div>
-                <div className="text-sm font-medium text-white">正在加载代码图谱</div>
-                <div className="mt-2 text-xs leading-relaxed text-slate-500">读取本地 Rigel 图数据库并生成可视化节点。</div>
+                <div className="mx-auto mb-5 relative flex h-12 w-12 items-center justify-center">
+                  <div className="absolute inset-0 rounded-full border-2 border-indigo-500/30 border-t-indigo-500 animate-spin"></div>
+                  <div className="h-6 w-6 rounded-full bg-indigo-500/20 animate-pulse"></div>
+                </div>
+                <div className="text-[15px] font-semibold text-white">正在加载代码图谱</div>
+                <div className="mt-2 text-[13px] leading-relaxed text-slate-400">读取本地 Rigel 图数据库并生成可视化节点。</div>
               </>
             ) : errorMessage ? (
               <>
-                <div className="text-sm font-medium text-white">图谱加载失败</div>
-                <div className="mt-2 text-xs leading-relaxed text-slate-500">{errorMessage}</div>
-                <button onClick={loadGraph} className="mt-4 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300 transition-colors hover:bg-white/10 hover:text-white">
+                <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-red-500/10">
+                  <div className="h-5 w-5 rounded-full bg-red-500/80"></div>
+                </div>
+                <div className="text-[15px] font-semibold text-white">图谱加载失败</div>
+                <div className="mt-2 text-[13px] leading-relaxed text-red-400/80">{errorMessage}</div>
+                <button onClick={loadGraph} className="mt-5 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-[13px] font-medium text-slate-200 transition-all hover:bg-white/10 hover:text-white active:scale-95">
                   重新加载
                 </button>
               </>
             ) : (
               <>
-                <div className="text-sm font-medium text-white">暂无图谱数据</div>
-                <div className="mt-2 text-xs leading-relaxed text-slate-500">当前数据库没有可展示的节点，请重新执行 rigel index。</div>
+                <div className="text-[15px] font-semibold text-white">暂无图谱数据</div>
+                <div className="mt-2 text-[13px] leading-relaxed text-slate-400">当前数据库没有可展示的节点，请重新执行 rigel index。</div>
               </>
             )}
           </div>
         </div>
       )}
 
-      <div className="absolute bottom-6 left-6 z-10 flex flex-col gap-1 rounded-lg border border-white/5 bg-black/40 p-4 backdrop-blur-md">
-        <div className="mb-1 text-[10px] uppercase tracking-wider text-slate-500">图谱统计</div>
-        <div className="flex gap-6">
+      <div className="absolute bottom-6 left-6 z-10 flex flex-col gap-2 rounded-xl border border-white/10 bg-black/40 p-4 shadow-[0_4_20px_rgba(0,0,0,0.5)] backdrop-blur-xl ring-1 ring-white/5">
+        <div className="flex items-center gap-2">
+          <div className="h-1.5 w-1.5 rounded-full bg-green-500"></div>
+          <div className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold">图谱统计</div>
+        </div>
+        <div className="flex gap-6 mt-1">
           <div>
-            <div className="font-mono text-xl tracking-wide text-white">{summary.nodeCount}</div>
-            <div className="text-[10px] text-slate-500">节点数</div>
+            <div className="font-mono text-xl font-bold tracking-wide text-white">{summary.nodeCount}</div>
+            <div className="text-[11px] text-slate-500 font-medium">节点数</div>
           </div>
-          <div className="h-8 w-[1px] bg-white/10"></div>
+          <div className="h-8 w-[1px] bg-white/10 self-center"></div>
           <div>
-            <div className="font-mono text-xl tracking-wide text-white">{summary.edgeCount}</div>
-            <div className="text-[10px] text-slate-500">边数</div>
+            <div className="font-mono text-xl font-bold tracking-wide text-white">{summary.edgeCount}</div>
+            <div className="text-[11px] text-slate-500 font-medium">边数</div>
           </div>
         </div>
       </div>
 
-      <div className="absolute bottom-6 right-6 z-10 flex items-center gap-2">
-        <button onClick={() => zoomBy(0.8)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-400 backdrop-blur-md transition-colors hover:bg-white/10 hover:text-white" aria-label="缩小图谱">
-          <ZoomOut className="h-4 w-4" />
+      <div className="absolute bottom-6 right-6 z-10 flex items-center gap-2 rounded-xl border border-white/10 bg-black/40 p-1.5 shadow-[0_4_20px_rgba(0,0,0,0.5)] backdrop-blur-xl ring-1 ring-white/5">
+        <button onClick={() => zoomBy(0.8)} className="group flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-white/10 hover:text-white active:scale-95" aria-label="缩小图谱">
+          <ZoomOut className="h-[18px] w-[18px] transition-transform group-hover:scale-110" />
         </button>
-        <button onClick={fitGraph} className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-400 backdrop-blur-md transition-colors hover:bg-white/10 hover:text-white" aria-label="适配图谱">
-          <Maximize className="h-4 w-4" />
+        <button onClick={fitGraph} className="group flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-white/10 hover:text-white active:scale-95" aria-label="适配图谱">
+          <Maximize className="h-[18px] w-[18px] transition-transform group-hover:scale-110" />
         </button>
-        <button onClick={() => zoomBy(1.25)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-400 backdrop-blur-md transition-colors hover:bg-white/10 hover:text-white" aria-label="放大图谱">
-          <ZoomIn className="h-4 w-4" />
+        <button onClick={() => zoomBy(1.25)} className="group flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-white/10 hover:text-white active:scale-95" aria-label="放大图谱">
+          <ZoomIn className="h-[18px] w-[18px] transition-transform group-hover:scale-110" />
         </button>
-        <button onClick={loadGraph} className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-400 backdrop-blur-md transition-colors hover:bg-white/10 hover:text-white" aria-label="重新加载图谱">
-          <RotateCcw className="h-4 w-4" />
+
+        <div className="w-[1px] h-5 bg-white/10 mx-1"></div>
+
+        <button onClick={loadGraph} className="group flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-white/10 hover:text-white active:scale-95" aria-label="重新加载图谱">
+          <RotateCcw className="h-[18px] w-[18px] transition-transform group-hover:-rotate-90" />
         </button>
         <button
           onClick={refreshIncrementally}
           disabled={isIndexing}
-          className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-400 backdrop-blur-md transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+          className="group flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition-all hover:bg-white/10 hover:text-white active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
           aria-label="执行增量索引"
         >
-          <RefreshCw className={`h-4 w-4 ${isIndexing ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`h-[18px] w-[18px] ${isIndexing ? 'animate-spin text-indigo-400' : 'transition-transform group-hover:rotate-90'}`} />
         </button>
       </div>
     </div>
