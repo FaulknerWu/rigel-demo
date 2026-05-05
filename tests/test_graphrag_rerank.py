@@ -122,7 +122,6 @@ def llm_config() -> LLMConfig:
         api_key="token",
         base_url=None,
         timeout_seconds=60,
-        system_prompt="system",
         section=LLMConfigSection.CHAT,
     )
 

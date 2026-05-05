@@ -7,64 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from rigel_demo.config.document import ConfigDocumentErrorMessages, read_config_document
-from rigel_demo.config.llm import DEFAULT_CHAT_SYSTEM_PROMPT, DEFAULT_SUMMARY_SYSTEM_PROMPT
 
 WEB_CONFIG_SECTION_NAME = "web"
-DEFAULT_CONFIG_DOCUMENT = {
-    "web": {
-        "host": "127.0.0.1",
-        "port": 5000,
-        "open_browser": True,
-    },
-    "graphrag": {
-        "falkordb_host": "127.0.0.1",
-        "falkordb_port": 6379,
-        "falkordb_username": None,
-        "falkordb_password": None,
-    },
-    "chat": {
-        "provider": "openai",
-        "model": "gpt-5.2",
-        "api_key": "sk-your-openai-key",
-        "base_url": None,
-        "timeout_seconds": 120,
-        "temperature": None,
-        "max_output_tokens": None,
-        "system_prompt": DEFAULT_CHAT_SYSTEM_PROMPT,
-    },
-    "summary": {
-        "provider": "openai",
-        "model": "gpt-5.2",
-        "api_key": "sk-your-openai-key",
-        "base_url": None,
-        "timeout_seconds": 60,
-        "temperature": 0,
-        "max_output_tokens": 2048,
-        "concurrent_requests": 10,
-        "system_prompt": DEFAULT_SUMMARY_SYSTEM_PROMPT,
-    },
-    "embedding": {
-        "provider": "openai",
-        "format": "openai_embeddings",
-        "model": "text-embedding-3-small",
-        "api_key": "sk-your-openai-key",
-        "base_url": None,
-        "dimensions": 2000,
-        "timeout_seconds": 60,
-        "batch_size": 25,
-        "input_mode": "array",
-    },
-    "rerank": {
-        "provider": "gitee_ai",
-        "base_url": "",
-        "model": "",
-        "api_key": "your-gitee-ai-token",
-        "timeout_seconds": 60,
-        "top_n": 5,
-        "candidate_limit_per_query": 20,
-        "failover_enabled": False,
-    },
-}
 
 
 @dataclass(frozen=True, slots=True)

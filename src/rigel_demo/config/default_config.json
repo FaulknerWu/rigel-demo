@@ -1,0 +1,53 @@
+{
+  "web": {
+    "host": "127.0.0.1",
+    "port": 5000,
+    "open_browser": true
+  },
+  "graphrag": {
+    "falkordb_host": "127.0.0.1",
+    "falkordb_port": 6379,
+    "falkordb_username": null,
+    "falkordb_password": null
+  },
+  "chat": {
+    "provider": "openai",
+    "model": "gpt-5.2",
+    "api_key": "sk-your-openai-key",
+    "base_url": null,
+    "timeout_seconds": 120,
+    "temperature": null,
+    "max_output_tokens": null
+  },
+  "summary": {
+    "provider": "openai",
+    "model": "gpt-5.2",
+    "api_key": "sk-your-openai-key",
+    "base_url": null,
+    "timeout_seconds": 60,
+    "temperature": 0,
+    "max_output_tokens": 2048,
+    "concurrent_requests": 10
+  },
+  "embedding": {
+    "provider": "openai",
+    "format": "openai_embeddings",
+    "model": "text-embedding-3-small",
+    "api_key": "sk-your-openai-key",
+    "base_url": null,
+    "dimensions": 2000,
+    "timeout_seconds": 60,
+    "batch_size": 25,
+    "input_mode": "array"
+  },
+  "rerank": {
+    "provider": "gitee_ai",
+    "base_url": "",
+    "model": "",
+    "api_key": "your-gitee-ai-token",
+    "timeout_seconds": 60,
+    "top_n": 5,
+    "candidate_limit_per_query": 20,
+    "failover_enabled": false
+  }
+}

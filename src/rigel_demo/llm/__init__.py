@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from rigel_demo.config import (
-    DEFAULT_CHAT_SYSTEM_PROMPT,
-    DEFAULT_SUMMARY_SYSTEM_PROMPT,
     LLMConfig,
     LLMConfigSection,
     LLMConfigurationError,
@@ -19,8 +17,6 @@ from rigel_demo.llm.client import (
 )
 
 __all__ = [
-    "DEFAULT_CHAT_SYSTEM_PROMPT",
-    "DEFAULT_SUMMARY_SYSTEM_PROMPT",
     "LLMConfig",
     "LLMConfigSection",
     "LLMConfigurationError",

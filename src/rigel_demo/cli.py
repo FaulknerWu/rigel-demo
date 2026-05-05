@@ -14,11 +14,11 @@ from typing import TYPE_CHECKING, Literal, Sequence
 
 from rigel_demo.cli_frontend import FrontendBuildResult, build_frontend
 from rigel_demo.config import (
-    DEFAULT_CONFIG_DOCUMENT,
     RIGEL_CONFIG_FILE_NAME,
     RIGEL_WORKSPACE_DIRECTORY_NAME,
     WebConfig,
     WebConfigurationError,
+    default_config_document_text,
 )
 
 if TYPE_CHECKING:
@@ -436,10 +436,7 @@ def _write_default_config_if_missing(config_path: Path) -> bool:
     if config_path.exists():
         return False
 
-    config_path.write_text(
-        json.dumps(DEFAULT_CONFIG_DOCUMENT, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    config_path.write_text(default_config_document_text(), encoding="utf-8")
     return True
 
 

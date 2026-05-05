@@ -7,12 +7,12 @@ from typing import cast
 
 from rigel_demo.graph.ir import GraphNode, NodeType
 
-DEFAULT_CHAT_SYSTEM_PROMPT = (
+CHAT_SYSTEM_PROMPT = (
     "你是 Rigel 的代码图谱分析助手。回答时优先基于用户给出的代码图谱、仓库上下文与当前问题，"
     "无法从上下文确认的内容要明确说明不确定。"
 )
 
-DEFAULT_SUMMARY_SYSTEM_PROMPT = (
+SUMMARY_SYSTEM_PROMPT = (
     "请基于给出的节点结构信息生成一条信息密度高、可检索的中文摘要，完整记录该节点的职责、"
     "核心逻辑、对外能力、构建或维护的对象、所属路径或限定名、生产/测试/生成代码属性，"
     "以及可从名称、类型、签名、属性中判断出的关键业务词、技术词和检索别名。"

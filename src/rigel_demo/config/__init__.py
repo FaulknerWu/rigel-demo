@@ -8,6 +8,7 @@ from rigel_demo.config.document import (
     ConfigDocumentErrorMessages,
     ConfigFieldReader,
     config_document_path,
+    default_config_document_text,
     read_config_document,
 )
 from rigel_demo.config.embedding import (
@@ -18,19 +19,14 @@ from rigel_demo.config.embedding import (
 )
 from rigel_demo.config.graphrag import GraphRAGConfig, GraphRAGConfigurationError
 from rigel_demo.config.llm import (
-    DEFAULT_CHAT_SYSTEM_PROMPT,
-    DEFAULT_SUMMARY_SYSTEM_PROMPT,
     LLMConfig,
     LLMConfigSection,
     LLMConfigurationError,
 )
 from rigel_demo.config.rerank import RerankConfig, RerankConfigurationError
-from rigel_demo.config.web import DEFAULT_CONFIG_DOCUMENT, WebConfig, WebConfigurationError
+from rigel_demo.config.web import WebConfig, WebConfigurationError
 
 __all__ = [
-    "DEFAULT_CHAT_SYSTEM_PROMPT",
-    "DEFAULT_CONFIG_DOCUMENT",
-    "DEFAULT_SUMMARY_SYSTEM_PROMPT",
     "EmbeddingConfig",
     "EmbeddingConfigurationError",
     "EmbeddingFormat",
@@ -49,5 +45,6 @@ __all__ = [
     "WebConfig",
     "WebConfigurationError",
     "config_document_path",
+    "default_config_document_text",
     "read_config_document",
 ]

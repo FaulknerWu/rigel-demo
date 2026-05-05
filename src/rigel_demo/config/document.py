@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from importlib.resources import files
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, NoReturn
 
 RIGEL_WORKSPACE_DIRECTORY_NAME = ".rigel"
 RIGEL_CONFIG_FILE_NAME = "config.json"
+DEFAULT_CONFIG_RESOURCE_NAME = "default_config.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +28,12 @@ def config_document_path(repository_path: Path) -> Path:
     """返回目标仓库中的 `.rigel/config.json` 路径。"""
 
     return repository_path / RIGEL_WORKSPACE_DIRECTORY_NAME / RIGEL_CONFIG_FILE_NAME
+
+
+def default_config_document_text() -> str:
+    """读取随包分发的默认配置模板文本。"""
+
+    return files("rigel_demo.config").joinpath(DEFAULT_CONFIG_RESOURCE_NAME).read_text(encoding="utf-8")
 
 
 def read_config_document(

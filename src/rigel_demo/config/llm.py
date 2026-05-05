@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from rigel_demo.config.document import ConfigDocumentErrorMessages, ConfigFieldReader, read_config_document
-from rigel_demo.prompts import DEFAULT_CHAT_SYSTEM_PROMPT, DEFAULT_SUMMARY_SYSTEM_PROMPT
+from rigel_demo.prompts import CHAT_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT
 
 MAX_SUMMARY_CONCURRENT_REQUESTS = 32
 
@@ -33,11 +33,16 @@ class LLMConfig:
     api_key: str
     base_url: str | None
     timeout_seconds: float
-    system_prompt: str
     temperature: float | None = None
     max_output_tokens: int | None = None
     concurrent_requests: int = 1
     section: LLMConfigSection = LLMConfigSection.CHAT
+
+    @property
+    def system_prompt(self) -> str:
+        """返回当前功能段内置的系统提示词。"""
+
+        return _system_prompt_for_section(self.section)
 
     @classmethod
     def from_repository(
@@ -54,6 +59,7 @@ class LLMConfig:
             error_type=LLMConfigurationError,
         )
         provider = reader.required_string("provider").lower()
+        _reject_external_system_prompt(reader)
 
         return cls(
             provider=provider,
@@ -61,7 +67,6 @@ class LLMConfig:
             api_key=reader.required_string("api_key"),
             base_url=_read_base_url(reader, provider),
             timeout_seconds=reader.positive_float("timeout_seconds"),
-            system_prompt=reader.required_string("system_prompt"),
             temperature=reader.nullable_float("temperature"),
             max_output_tokens=reader.nullable_positive_int("max_output_tokens"),
             concurrent_requests=_read_concurrent_requests(reader, normalized_section),
@@ -108,3 +113,16 @@ def _read_concurrent_requests(reader: ConfigFieldReader, section: LLMConfigSecti
     if section != LLMConfigSection.SUMMARY:
         return 1
     return reader.bounded_int("concurrent_requests", minimum=1, maximum=MAX_SUMMARY_CONCURRENT_REQUESTS)
+
+
+def _reject_external_system_prompt(reader: ConfigFieldReader) -> None:
+    if "system_prompt" in reader.data:
+        raise LLMConfigurationError(f"{reader.field_path('system_prompt')} 已改为系统内置，不允许在配置文件中设置")
+
+
+def _system_prompt_for_section(section: LLMConfigSection) -> str:
+    if section == LLMConfigSection.CHAT:
+        return CHAT_SYSTEM_PROMPT
+    if section == LLMConfigSection.SUMMARY:
+        return SUMMARY_SYSTEM_PROMPT
+    raise LLMConfigurationError(f"不支持的 LLM 配置段：{section}")
