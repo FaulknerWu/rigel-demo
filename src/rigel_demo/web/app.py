@@ -26,7 +26,6 @@ from rigel_demo.graphrag import (
     build_graphrag_chat_service,
 )
 from rigel_demo.query.service import (
-    DEFAULT_GRAPH_LIMIT,
     RigelGraphReader,
 )
 from rigel_demo.embedding import (
@@ -99,11 +98,11 @@ def create_app(
             return {"status": "success", "summary": graph_reader.summary()}
 
     @app.get("/api/graph")
-    def graph(limit: int = DEFAULT_GRAPH_LIMIT) -> dict[str, object]:
+    def graph(limit: int | None = None) -> dict[str, object]:
         """返回前端可直接渲染的节点和边。"""
 
         _ensure_database_exists(database_path)
-        if limit < 1:
+        if limit is not None and limit < 1:
             raise HTTPException(status_code=400, detail="limit 必须大于 0")
         with RigelGraphReader(database_path=database_path, graph_name=graph_name) as graph_reader:
             return {"status": "success", "graph": graph_reader.graph(limit=limit)}

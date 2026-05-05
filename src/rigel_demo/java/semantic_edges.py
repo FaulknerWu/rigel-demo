@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+import logging
 from pathlib import Path
+import stat
 from typing import ContextManager, Protocol
 
 from multilspy import SyncLanguageServer
@@ -53,6 +55,8 @@ class JavaLspClient(Protocol):
 
     def request_references(self, file_path: str, line: int, column: int) -> list[JsonObject]: ...
 
+    def diagnostics(self) -> tuple[str, ...]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class _SemanticCandidate:
@@ -71,6 +75,7 @@ class JavaSemanticEdgeReport:
     candidate_count: int
     lsp_request_count: int
     lsp_hit_count: int
+    lsp_diagnostics: tuple[str, ...] = ()
 
 
 def enrich_java_semantic_edges(
@@ -118,6 +123,7 @@ def enrich_java_semantic_edges_with_report(
     lsp_request_count = 0
     lsp_hit_count = 0
 
+    lsp_diagnostics: tuple[str, ...] = ()
     with lsp_context as active_lsp:
         # 候选边先由 Tree-sitter 定位语法位置，再交给 LSP 解析真实目标，兼顾覆盖率和语义精度。
         for candidate in candidates:
@@ -149,11 +155,13 @@ def enrich_java_semantic_edges_with_report(
         lsp_request_count += reference_target_count
         _add_override_edges(graph, graph_index)
         _add_alias_edges(graph, graph_index)
+        lsp_diagnostics = active_lsp.diagnostics() if hasattr(active_lsp, "diagnostics") else ()
 
     return JavaSemanticEdgeReport(
         candidate_count=len(candidates),
         lsp_request_count=lsp_request_count,
         lsp_hit_count=lsp_hit_count,
+        lsp_diagnostics=lsp_diagnostics,
     )
 
 
@@ -161,8 +169,86 @@ def _started_lsp(repository_root: Path, timeout_seconds: int) -> ContextManager[
     """启动 multilspy 管理的 Java LSP，并返回可直接进入的上下文管理器。"""
 
     config = MultilspyConfig.from_dict({"code_language": "java"})
-    language_server = SyncLanguageServer.create(config, MultilspyLogger(), str(repository_root), timeout=timeout_seconds)
-    return language_server.start_server()
+    language_server = SyncLanguageServer.create(
+        config,
+        CapturingMultilspyLogger(),
+        str(repository_root),
+        timeout=timeout_seconds,
+    )
+    _ensure_jdtls_runtime_executable(language_server)
+    return _JavaLspContext(language_server.start_server(), language_server)
+
+
+class CapturingMultilspyLogger(MultilspyLogger):
+    """记录 JDTLS 导入失败等关键日志，便于索引失败时直接暴露根因。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def log(self, debug_message: str, level: int, sanitized_error_message: str = "") -> None:
+        if level >= logging.WARNING:
+            message = sanitized_error_message or debug_message
+            if message:
+                self.messages.append(message)
+        super().log(debug_message, level, sanitized_error_message)
+
+    def diagnostics(self) -> tuple[str, ...]:
+        return tuple(self.messages[-5:])
+
+
+class _JavaLspContext:
+    """把 multilspy 上下文和诊断日志组合为 JavaLspClient。"""
+
+    def __init__(self, context: ContextManager[SyncLanguageServer], language_server: SyncLanguageServer) -> None:
+        self._context = context
+        self._language_server = language_server
+
+    def __enter__(self) -> "_JavaLspSession":
+        return _JavaLspSession(self._context.__enter__(), self._logger())
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> object:
+        return self._context.__exit__(exc_type, exc_value, traceback)
+
+    def _logger(self) -> CapturingMultilspyLogger | None:
+        logger = getattr(self._language_server.language_server, "logger", None)
+        return logger if isinstance(logger, CapturingMultilspyLogger) else None
+
+
+class _JavaLspSession:
+    """带诊断读取能力的同步 LSP 会话。"""
+
+    def __init__(self, language_server: SyncLanguageServer, logger: CapturingMultilspyLogger | None) -> None:
+        self._language_server = language_server
+        self._logger = logger
+
+    def request_definition(self, file_path: str, line: int, column: int) -> list[JsonObject]:
+        return [dict(location) for location in self._language_server.request_definition(file_path, line, column)]
+
+    def request_references(self, file_path: str, line: int, column: int) -> list[JsonObject]:
+        return [dict(location) for location in self._language_server.request_references(file_path, line, column)]
+
+    def diagnostics(self) -> tuple[str, ...]:
+        return self._logger.diagnostics() if self._logger is not None else ()
+
+
+def _ensure_jdtls_runtime_executable(language_server: SyncLanguageServer) -> None:
+    """修复 multilspy 解压 JDTLS 运行时后可能丢失的可执行权限。"""
+
+    runtime_paths = getattr(language_server.language_server, "runtime_dependency_paths", None)
+    if runtime_paths is None:
+        return
+
+    executable_paths = [
+        getattr(runtime_paths, "jre_path", ""),
+        Path(getattr(runtime_paths, "jre_home_path", "")) / "bin" / "javac",
+        Path(getattr(runtime_paths, "jre_home_path", "")) / "lib" / "jspawnhelper",
+    ]
+    for executable_path in executable_paths:
+        path = Path(executable_path)
+        if path.exists():
+            current_mode = path.stat().st_mode
+            path.chmod(current_mode | stat.S_IXUSR)
 
 
 def _collect_tree_sitter_candidates(

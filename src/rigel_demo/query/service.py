@@ -24,7 +24,6 @@ from rigel_demo.query.source_reader import (
 )
 from rigel_demo.storage.falkordb.store import FalkorDBConfig, FalkorDBStore
 
-DEFAULT_GRAPH_LIMIT = 500
 VISIBLE_NODE_TYPES = ("Repository", "Module", "File", "Entity")
 VISIBLE_EDGE_TYPES = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES")
 
@@ -92,7 +91,7 @@ class RigelGraphReader:
             ],
         }
 
-    def graph(self, *, limit: int) -> dict[str, list[dict[str, object]]]:
+    def graph(self, *, limit: int | None = None) -> dict[str, list[dict[str, object]]]:
         """读取默认可视化语义节点和这些节点之间的语义边。"""
 
         node_rows = self._query(
@@ -100,10 +99,10 @@ class RigelGraphReader:
             MATCH (node:RigelNode)
             WHERE node.rigel_type IN $visible_node_types
             RETURN node.id, properties(node)
-            LIMIT $limit
             """,
-            {"visible_node_types": list(VISIBLE_NODE_TYPES), "limit": limit},
+            {"visible_node_types": list(VISIBLE_NODE_TYPES)},
         )
+        node_rows = _limit_rows(sorted(node_rows, key=_visual_node_sort_key), limit)
         nodes = [format_node(node_id, properties) for node_id, properties in node_rows]
         node_ids = [node["id"] for node in nodes]
         if not node_ids:
@@ -121,14 +120,14 @@ class RigelGraphReader:
             WHERE source.id IN $node_ids AND target.id IN $node_ids
               AND type(edge) IN $visible_edge_types
             RETURN source.id, target.id, type(edge), properties(edge)
-            LIMIT $limit
+            ORDER BY CASE type(edge) WHEN 'CONTAINS' THEN 0 ELSE 1 END, source.id, target.id
             """,
             {
                 "node_ids": node_ids,
                 "visible_edge_types": list(VISIBLE_EDGE_TYPES),
-                "limit": limit * 2,
             },
         )
+        edge_rows = _limit_rows(edge_rows, limit * 2 if limit is not None else None)
         edges = [format_edge(source_id, target_id, edge_type, properties) for source_id, target_id, edge_type, properties in edge_rows]
         return {"nodes": nodes, "edges": edges}
 
@@ -399,6 +398,53 @@ def _with_generated_summary(node: dict[str, object], summaries_by_node_id: Mappi
     properties["generated_summary"] = summary_text
     formatted_node["properties"] = properties
     return formatted_node
+
+
+def _limit_rows(rows: list[list[Any]], limit: int | None) -> list[list[Any]]:
+    if limit is None:
+        return rows
+    return rows[:limit]
+
+
+def _visual_node_sort_key(row: list[Any]) -> tuple[int, int, str]:
+    node_id, properties = row
+    node_properties = cast(Mapping[str, object], properties)
+    node_type = str(node_properties.get("rigel_type", ""))
+    kind_norm = str(node_properties.get("kind_norm", ""))
+    stable_label = str(
+        node_properties.get("relative_path")
+        or node_properties.get("qualified_name")
+        or node_properties.get("display_name")
+        or node_properties.get("name")
+        or node_id
+    )
+    return (
+        _visual_node_type_priority(node_type),
+        _visual_entity_kind_priority(kind_norm),
+        stable_label,
+    )
+
+
+def _visual_node_type_priority(node_type: str) -> int:
+    priorities = {
+        "Repository": 0,
+        "Module": 1,
+        "File": 2,
+        "Entity": 3,
+    }
+    return priorities.get(node_type, len(priorities))
+
+
+def _visual_entity_kind_priority(kind_norm: str) -> int:
+    priorities = {
+        "class": 0,
+        "interface": 1,
+        "enum": 2,
+        "record": 3,
+        "field": 4,
+        "method": 5,
+    }
+    return priorities.get(kind_norm, len(priorities))
 
 
 def _expand_graph_query(direction: GraphExpansionDirection) -> str:

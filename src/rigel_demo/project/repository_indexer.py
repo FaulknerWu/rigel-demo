@@ -293,9 +293,11 @@ def _enrich_java_semantic_edges_or_fail(
     _report_graph_stats(progress_reporter, f"{phase_label}后", graph)
 
     if lsp_added_edge_count == 0:
+        diagnostics_message = _lsp_diagnostics_message(getattr(report, "lsp_diagnostics", ()))
         raise JavaSemanticEdgeFailure(
             f"{phase_label}失败：Java 文件已进入语义补边阶段，但 LSP 没有新增任何边。"
             f"候选={report.candidate_count}，LSP请求={report.lsp_request_count}，LSP命中={report.lsp_hit_count}。"
+            f"{diagnostics_message}"
             "请检查 Java/Gradle/JDTLS 配置后重新执行索引。"
         )
 
@@ -354,6 +356,20 @@ def _summary_progress_reporter(
         )
 
     return report
+
+
+def _lsp_diagnostics_message(diagnostics: tuple[str, ...]) -> str:
+    if not diagnostics:
+        return ""
+    joined_diagnostics = "；".join(_compact_lsp_diagnostic(diagnostic) for diagnostic in diagnostics)
+    return f"LSP诊断={joined_diagnostics}。"
+
+
+def _compact_lsp_diagnostic(diagnostic: str) -> str:
+    compacted = " ".join(diagnostic.split())
+    if len(compacted) <= 500:
+        return compacted
+    return f"{compacted[:500]}..."
 
 
 def _report_progress(

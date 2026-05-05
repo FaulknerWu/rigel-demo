@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
 from rigel_demo.graph import EdgeType, NodeType
 from rigel_demo.java import JavaParseRequest, JavaSemanticEdgeRequest, enrich_java_semantic_edges, parse_java_file
+from rigel_demo.java import semantic_edges as java_semantic_edges
 from rigel_demo.java.requests import GENERATED_ZONE
 
 
@@ -132,6 +134,30 @@ class JavaSemanticEdgesTest(TestCase):
         ]
         self.assertIn(("src/main/java/demo/UnicodeService.java", 2, 27), service_definition_requests)
         self.assertNotIn(("src/main/java/demo/UnicodeService.java", 2, 33), service_definition_requests)
+
+    def test_jdtls_runtime_permission_repair_adds_user_execute_bits(self) -> None:
+        with TemporaryDirectory() as workspace:
+            runtime_home = Path(workspace)
+            java_path = runtime_home / "bin" / "java"
+            javac_path = runtime_home / "bin" / "javac"
+            helper_path = runtime_home / "lib" / "jspawnhelper"
+            for path in (java_path, javac_path, helper_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("", encoding="utf-8")
+                path.chmod(0o600)
+            language_server = SimpleNamespace(
+                language_server=SimpleNamespace(
+                    runtime_dependency_paths=SimpleNamespace(
+                        jre_path=str(java_path),
+                        jre_home_path=str(runtime_home),
+                    )
+                )
+            )
+
+            java_semantic_edges._ensure_jdtls_runtime_executable(language_server)
+
+            for path in (java_path, javac_path, helper_path):
+                self.assertTrue(path.stat().st_mode & 0o100)
 
 
 class _FakeLspClient:

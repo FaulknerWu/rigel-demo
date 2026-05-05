@@ -198,9 +198,10 @@ class RepositoryIndexerTest(TestCase):
                     candidate_count=1,
                     lsp_request_count=1,
                     lsp_hit_count=0,
+                    lsp_diagnostics=("Gradle import failed",),
                 )
 
-                with self.assertRaisesRegex(repository_indexer.JavaSemanticEdgeFailure, "没有新增任何边"):
+                with self.assertRaisesRegex(repository_indexer.JavaSemanticEdgeFailure, "Gradle import failed"):
                     repository_indexer.index_repository(
                         repository_path,
                         embedding_client=_FakeEmbeddingClient(),

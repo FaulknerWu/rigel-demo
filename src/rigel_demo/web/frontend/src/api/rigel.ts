@@ -140,10 +140,8 @@ const NODE_TYPE_COLORS = [
   '#f472b6',
 ];
 
-const GRAPH_LIMIT = 500;
-
 export async function fetchGraph(): Promise<GraphData> {
-  const response = await fetch(`/api/graph?limit=${GRAPH_LIMIT}`);
+  const response = await fetch('/api/graph');
   const payload = await readJson<ApiGraphResponse>(response);
   return adaptGraph(payload.graph);
 }

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from rigel_demo.entities import Anchor, Entity, File, Module, Repository
 from rigel_demo.graph import EdgeType, GraphEdge, GraphIR
+from rigel_demo.graph.ir import GraphNode, NodeType
 from rigel_demo.embedding import EmbeddingConfig, EmbeddingConfigurationError, EmbeddingFormat, EmbeddingInputMode
 from rigel_demo.project.summaries import attach_retrieval_summaries
 from rigel_demo.llm import (
@@ -183,6 +184,39 @@ class WebAppLLMTest(TestCase):
         payload = response.json()
         payment_node = next(node for node in payload["graph"]["nodes"] if node["id"] == "entity:demo:PaymentService")
         self.assertEqual(payment_node["properties"]["generated_summary"], "PaymentService 处理付款流程")
+
+    def test_graph_endpoint_prioritizes_connected_structure_over_orphan_methods(self) -> None:
+        fake_embedding = _FakeEmbeddingClient()
+        with TemporaryDirectory() as workspace:
+            repository_path = Path(workspace)
+            database_path = _write_demo_graph(repository_path, fake_embedding)
+            with FalkorDBStore.connect(FalkorDBConfig(graph_name="rigel", database_path=str(database_path))) as store:
+                store.upsert_node(
+                    GraphNode(
+                        id="entity:demo:Orphan#run()",
+                        type=NodeType.ENTITY,
+                        properties={
+                            "entity_key": "java:demo.Orphan#run()",
+                            "display_name": "run",
+                            "qualified_name": "demo.Orphan#run()",
+                            "kind_norm": "method",
+                            "kind_raw": "method_declaration",
+                            "origin": "internal",
+                            "semantic_hash": "sha256:orphan-method",
+                        },
+                    )
+                )
+            with RigelGraphReader(database_path=database_path, graph_name="rigel") as graph_reader:
+                graph = graph_reader.graph(limit=4)
+
+        node_ids = {node["id"] for node in graph["nodes"]}
+        linked_node_ids = {
+            endpoint_id
+            for edge in graph["edges"]
+            for endpoint_id in (edge["source"], edge["target"])
+        }
+        self.assertNotIn("entity:demo:Orphan#run()", node_ids)
+        self.assertEqual(node_ids, linked_node_ids)
 
     def test_source_reader_rejects_non_integer_line_ranges(self) -> None:
         with TemporaryDirectory() as workspace:
