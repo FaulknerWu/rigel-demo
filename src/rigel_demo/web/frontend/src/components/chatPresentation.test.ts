@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { formatGraphRAGQuery, formatQueryArgs } from './chatPresentation';
 
 assert.equal(
-  formatGraphRAGQuery({ name: 'vector_search_seeds', args: { query_text: 'PaymentService' } }),
-  'vector_search_seeds: PaymentService',
+  formatGraphRAGQuery({ name: 'vector_search_seeds', args: { query_texts: ['PaymentService', '付款流程'] } }),
+  'vector_search_seeds: PaymentService, 付款流程',
 );
 
 assert.equal(
@@ -17,6 +17,6 @@ assert.equal(
 );
 
 assert.equal(
-  formatQueryArgs({ query: 'MATCH (node)', limit: 20 }),
-  '{"query":"MATCH (node)","limit":20}',
+  formatQueryArgs({ query_texts: ['PaymentService'], items: [{ rerank_score: 0.93, vector_score: 0.72 }] }),
+  '{"query_texts":["PaymentService"],"items":[{"rerank_score":0.93,"vector_score":0.72}]}',
 );

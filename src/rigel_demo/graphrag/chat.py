@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
-from rigel_demo.config import GraphRAGConfig
+from rigel_demo.config import GraphRAGConfig, RerankConfig
 from rigel_demo.config.embedding import EmbeddingConfig
 from rigel_demo.embedding import RigelEmbedding, build_rigel_embedding
 from rigel_demo.graphrag.models import (
@@ -22,19 +22,12 @@ from rigel_demo.graphrag.runtime import (
 )
 from rigel_demo.graphrag.state import GraphRAGState
 from rigel_demo.graphrag.tools import (
-    DEFAULT_EXPAND_LIMIT_PER_NODE,
-    DEFAULT_RELATION_LIMIT_PER_NODE,
-    DEFAULT_VECTOR_SEARCH_LIMIT,
-    MAX_EXPAND_LIMIT_PER_NODE,
-    MAX_RELATION_LIMIT_PER_NODE,
     MAX_TOTAL_TOOL_CALLS,
-    MAX_VECTOR_SEARCH_LIMIT,
     TOOL_CALL_LIMITS,
     TOOL_EDGE_TYPES,
     TOOL_NAMES,
     agent_messages_with_evidence,
     bind_tool_schemas,
-    bounded_limit,
     direction_arg,
     edge_types_arg,
     evidence_prompt_payload,
@@ -69,6 +62,7 @@ from rigel_demo.query.presentation import (
     format_summary,
 )
 from rigel_demo.query.service import GraphExpansionDirection, VISIBLE_NODE_TYPES
+from rigel_demo.rerank import RerankResult, RigelReranker, build_rigel_reranker
 
 # 兼容既有测试与内部调用方，后续若需要可改为直接从 runtime 导入。
 _start_embedded_falkordb_runtime = start_embedded_falkordb_runtime
@@ -84,6 +78,7 @@ class LangGraphChatService:
         graphrag_config: GraphRAGConfig,
         graph_name: str,
         embedding_client: RigelEmbedding,
+        reranker: RigelReranker,
         database_path: Path | None = None,
         chat_model: Any | None = None,
         graph: Any | None = None,
@@ -92,6 +87,7 @@ class LangGraphChatService:
         self._graphrag_config = graphrag_config
         self._graph_name = graph_name
         self._embedding_client = embedding_client
+        self._reranker = reranker
         self._embedded_database = (
             start_embedded_falkordb_runtime(database_path=database_path, host=graphrag_config.host)
             if database_path is not None
@@ -266,57 +262,117 @@ class LangGraphChatService:
         fallback_query_text: str = "",
         known_node_ids: set[str],
     ) -> dict[str, object]:
-        query_text = string_arg(args, "query_text", default=fallback_query_text)
-        limit, limit_warnings = bounded_limit(
-            args.get("limit"),
-            default=DEFAULT_VECTOR_SEARCH_LIMIT,
-            maximum=MAX_VECTOR_SEARCH_LIMIT,
-            label="limit",
-        )
-        warnings = list(limit_warnings)
-        query_embedding = self._embedding_client.embed_query(query_text)
-        rows = query_graph(
-            self._active_graph(),
-            """
-            CALL db.idx.vector.queryNodes('Summary', 'embedding', $vector_limit, vecf32($query_embedding))
-            YIELD node AS summary, score AS distance
-            MATCH (summary)-[:DESCRIBES]->(target:RigelNode)
-            WHERE summary.purpose = $purpose
-              AND summary.embedding_model = $embedding_model
-              AND summary.embedding_dimensions = $embedding_dimensions
-              AND target.rigel_type IN $visible_node_types
-            RETURN summary.id AS summary_id, properties(summary) AS summary_properties,
-                   target.id AS node_id, properties(target) AS node_properties, distance AS distance
-            ORDER BY distance ASC
-            """,
-            {
-                "purpose": RETRIEVAL_SUMMARY_PURPOSE,
-                "embedding_model": self._embedding_client.config.model,
-                "embedding_dimensions": len(query_embedding),
-                "visible_node_types": list(VISIBLE_NODE_TYPES),
-                "query_embedding": query_embedding,
-                "vector_limit": limit,
-            },
+        query_texts = string_list_arg(args, "query_texts")
+        if not query_texts and fallback_query_text.strip():
+            query_texts = [fallback_query_text.strip()]
+        if not query_texts:
+            return tool_result("vector_search_seeds", [], ["query_texts 不能为空"])
+
+        candidates: dict[str, dict[str, object]] = {}
+        for query_text in dict.fromkeys(query_texts):
+            query_embedding = self._embedding_client.embed_query(query_text)
+            rows = query_graph(
+                self._active_graph(),
+                """
+                CALL db.idx.vector.queryNodes('Summary', 'embedding', $vector_limit, vecf32($query_embedding))
+                YIELD node AS summary, score AS distance
+                MATCH (summary)-[:DESCRIBES]->(target:RigelNode)
+                WHERE summary.purpose = $purpose
+                  AND summary.embedding_model = $embedding_model
+                  AND summary.embedding_dimensions = $embedding_dimensions
+                  AND target.rigel_type IN $visible_node_types
+                RETURN summary.id AS summary_id, properties(summary) AS summary_properties,
+                       target.id AS node_id, properties(target) AS node_properties, distance AS distance
+                ORDER BY distance ASC
+                """,
+                {
+                    "purpose": RETRIEVAL_SUMMARY_PURPOSE,
+                    "embedding_model": self._embedding_client.config.model,
+                    "embedding_dimensions": len(query_embedding),
+                    "visible_node_types": list(VISIBLE_NODE_TYPES),
+                    "query_embedding": query_embedding,
+                    "vector_limit": self._reranker.config.candidate_limit_per_query,
+                },
+            )
+            for row in rows:
+                summary_id, summary_properties, node_id, node_properties, distance = seed_row_values(row)
+                vector_score = cosine_distance_to_similarity(float(distance))
+                if vector_score <= 0:
+                    continue
+                node_key = str(node_id)
+                current_candidate = candidates.get(node_key)
+                if current_candidate is not None and float(current_candidate["vector_score"]) >= vector_score:
+                    continue
+                summary = format_summary(str(summary_id), cast(Mapping[str, object], summary_properties))
+                candidates[node_key] = {
+                    "vector_score": vector_score,
+                    "summary": summary,
+                    "node": format_node(node_key, cast(Mapping[str, object], node_properties)),
+                }
+
+        candidate_items = list(candidates.values())
+        if not candidate_items:
+            return tool_result("vector_search_seeds", [], [])
+
+        rerank_query = fallback_query_text.strip() or query_texts[0]
+        rerank_top_n = min(self._reranker.config.top_n, len(candidate_items))
+        rerank_results = self._reranker.rerank(
+            query=rerank_query,
+            documents=[summary_text(candidate["summary"]) for candidate in candidate_items],
+            top_n=rerank_top_n,
         )
         items: list[dict[str, object]] = []
-        for row in rows:
-            summary_id, summary_properties, node_id, node_properties, distance = seed_row_values(row)
-            score = cosine_distance_to_similarity(float(distance))
-            if score <= 0:
-                continue
-            node = format_node(str(node_id), cast(Mapping[str, object], node_properties))
+        used_indexes: set[int] = set()
+        for rerank_result in normalized_rerank_results(rerank_results):
+            candidate = candidate_items[rerank_result.index]
+            node = cast(Mapping[str, object], candidate["node"])
             known_node_ids.add(str(node["id"]))
+            used_indexes.add(rerank_result.index)
             items.append(
                 {
                     "tool": "vector_search_seeds",
-                    "score": score,
-                    "summary": format_summary(str(summary_id), cast(Mapping[str, object], summary_properties)),
-                    "node": node,
+                    "score": rerank_result.relevance_score,
+                    "vector_score": candidate["vector_score"],
+                    "rerank_score": rerank_result.relevance_score,
+                    "summary": candidate["summary"],
+                    "node": candidate["node"],
                 }
             )
 
-        items.sort(key=lambda item: (-cast(float, item["score"]), str(cast(Mapping[str, object], item["node"])["label"])))
-        return tool_result("vector_search_seeds", items[:limit], warnings)
+        if len(items) < rerank_top_n:
+            fallback_items = [
+                (index, candidate)
+                for index, candidate in enumerate(candidate_items)
+                if index not in used_indexes
+            ]
+            fallback_items.sort(
+                key=lambda item: (
+                    -float(item[1]["vector_score"]),
+                    str(cast(Mapping[str, object], item[1]["node"])["label"]),
+                )
+            )
+            for _, candidate in fallback_items[: rerank_top_n - len(items)]:
+                node = cast(Mapping[str, object], candidate["node"])
+                known_node_ids.add(str(node["id"]))
+                items.append(
+                    {
+                        "tool": "vector_search_seeds",
+                        "score": candidate["vector_score"],
+                        "vector_score": candidate["vector_score"],
+                        "rerank_score": None,
+                        "summary": candidate["summary"],
+                        "node": candidate["node"],
+                    }
+                )
+
+        items.sort(
+            key=lambda item: (
+                -(float(item["rerank_score"]) if isinstance(item["rerank_score"], int | float) else -1.0),
+                -float(item["vector_score"]),
+                str(cast(Mapping[str, object], item["node"])["label"]),
+            )
+        )
+        return tool_result("vector_search_seeds", items[: self._reranker.config.top_n], [])
 
     def _expand_neighbors(
         self,
@@ -328,13 +384,7 @@ class LangGraphChatService:
         requested_node_ids = string_list_arg(args, "node_ids")
         direction = direction_arg(args)
         edge_types, edge_warnings = edge_types_arg(args.get("edge_types"), default=list(TOOL_EDGE_TYPES))
-        limit_per_node, limit_warnings = bounded_limit(
-            args.get("limit_per_node"),
-            default=DEFAULT_EXPAND_LIMIT_PER_NODE,
-            maximum=MAX_EXPAND_LIMIT_PER_NODE,
-            label="limit_per_node",
-        )
-        warnings = [*edge_warnings, *limit_warnings]
+        warnings = [*edge_warnings]
         node_ids = filter_known_unvisited_node_ids(
             requested_node_ids,
             known_node_ids=known_node_ids,
@@ -345,7 +395,6 @@ class LangGraphChatService:
             node_ids,
             direction=direction,
             edge_types=edge_types,
-            limit_per_node=limit_per_node,
             known_node_ids=known_node_ids,
         )
         visited_node_ids.update(node_ids)
@@ -360,13 +409,7 @@ class LangGraphChatService:
         requested_node_ids = string_list_arg(args, "node_ids")
         relation_type = string_arg(args, "relation_type", default="")
         direction = direction_arg(args)
-        limit_per_node, limit_warnings = bounded_limit(
-            args.get("limit_per_node"),
-            default=DEFAULT_RELATION_LIMIT_PER_NODE,
-            maximum=MAX_RELATION_LIMIT_PER_NODE,
-            label="limit_per_node",
-        )
-        warnings = list(limit_warnings)
+        warnings: list[str] = []
         if relation_type not in TOOL_EDGE_TYPES:
             return tool_result("query_relation", [], [*warnings, f"非法关系类型已忽略：{relation_type}"])
         node_ids = filter_known_node_ids(requested_node_ids, known_node_ids=known_node_ids, warnings=warnings)
@@ -374,7 +417,6 @@ class LangGraphChatService:
             node_ids,
             direction=direction,
             edge_types=[relation_type],
-            limit_per_node=limit_per_node,
             known_node_ids=known_node_ids,
         )
         return tool_result("query_relation", relations, warnings)
@@ -385,7 +427,6 @@ class LangGraphChatService:
         *,
         direction: GraphExpansionDirection,
         edge_types: list[str],
-        limit_per_node: int,
         known_node_ids: set[str],
     ) -> list[dict[str, object]]:
         relations: list[dict[str, object]] = []
@@ -397,7 +438,6 @@ class LangGraphChatService:
                     "node_id": node_id,
                     "visible_node_types": list(VISIBLE_NODE_TYPES),
                     "edge_types": edge_types,
-                    "limit": limit_per_node,
                 },
             )
             for row in rows:
@@ -448,6 +488,7 @@ def build_graphrag_chat_service(
 ) -> LangGraphChatService:
     llm_config = LLMConfig.from_repository(repository_path, LLMConfigSection.CHAT)
     graphrag_config = GraphRAGConfig.from_repository(repository_path)
+    rerank_config = RerankConfig.from_repository(repository_path)
     active_embedding_client = embedding_client or build_rigel_embedding(EmbeddingConfig.from_repository(repository_path))
     return LangGraphChatService(
         config=llm_config,
@@ -455,4 +496,27 @@ def build_graphrag_chat_service(
         graph_name=graph_name,
         database_path=database_path,
         embedding_client=active_embedding_client,
+        reranker=build_rigel_reranker(rerank_config),
     )
+
+
+def summary_text(summary: object) -> str:
+    if isinstance(summary, Mapping):
+        text = summary.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    raise RigelGraphRAGError("Rerank 候选 Summary 缺少 text")
+
+
+def normalized_rerank_results(results: Sequence[object]) -> list[RerankResult]:
+    normalized_results: list[RerankResult] = []
+    for result in results:
+        if isinstance(result, RerankResult):
+            normalized_results.append(result)
+            continue
+        if isinstance(result, Mapping):
+            index = result.get("index")
+            relevance_score = result.get("relevance_score")
+            if isinstance(index, int) and not isinstance(index, bool) and isinstance(relevance_score, int | float):
+                normalized_results.append(RerankResult(index=index, relevance_score=float(relevance_score)))
+    return normalized_results

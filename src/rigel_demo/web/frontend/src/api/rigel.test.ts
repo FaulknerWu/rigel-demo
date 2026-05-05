@@ -102,7 +102,7 @@ assert.equal(indexResult.graphEdgeCount, 24);
 const chatResponse: ApiChatResponse = {
   status: 'success',
   message: { role: 'assistant', content: 'PaymentService 处理付款流程' },
-  queries: [{ name: 'vector_search_seeds', args: { query_text: 'PaymentService' } }],
+  queries: [{ name: 'vector_search_seeds', args: { query_texts: ['PaymentService'], items: [{ rerank_score: 0.9 }] } }],
   model: 'gpt-5.2',
   provider: 'openai',
 };

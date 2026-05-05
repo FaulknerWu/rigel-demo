@@ -91,7 +91,7 @@ uv run --project /home/user/workspace/rigel-demo rigel init
 
 ### 4. 填写模型配置
 
-编辑目标仓库中的 `.rigel/config.json`，至少需要填写 `chat.api_key`、`summary.api_key` 和 `embedding.api_key`。默认配置使用 OpenAI 兼容接口：
+编辑目标仓库中的 `.rigel/config.json`，至少需要填写 `chat.api_key`、`summary.api_key`、`embedding.api_key`、`rerank.base_url`、`rerank.model` 和 `rerank.api_key`。默认配置使用 OpenAI 兼容接口，并为 Rerank 预留 Gitee AI 兼容配置位：
 
 ```json
 {
@@ -117,12 +117,23 @@ uv run --project /home/user/workspace/rigel-demo rigel init
     "dimensions": 512,
     "batch_size": 64,
     "input_mode": "array"
+  },
+  "rerank": {
+    "provider": "gitee_ai",
+    "base_url": "",
+    "model": "",
+    "api_key": "your-gitee-ai-token",
+    "timeout_seconds": 60,
+    "top_n": 5,
+    "candidate_limit_per_query": 8,
+    "failover_enabled": false
   }
 }
 ```
 
 如果使用兼容 OpenAI 协议的第三方服务，需要同时配置对应段落的 `base_url`。
 如果 Embedding 服务只接受单条字符串输入，将 `embedding.input_mode` 改成 `"string"`；标准 OpenAI 兼容批量接口使用 `"array"`。
+`rerank.base_url` 必须配置到兼容 `/rerank` 的 `/v1` 级别地址，例如 Gitee AI 的 `/v1` 地址；代码会统一追加 `/rerank`。`rerank.model` 不提供真实默认值，必须按目标服务可用模型填写。需要 Gitee AI failover header 时，将 `rerank.failover_enabled` 改成 `true`。
 
 ### 5. 构建索引
 
@@ -176,12 +187,14 @@ uv run --project /home/wu/workspace/rigel-demo rigel web
 
 ## 配置说明
 
-`.rigel/config.json` 按功能分为五段：
+`.rigel/config.json` 按功能分为六段：
 
 - `web`：Web 后端监听地址、端口和是否自动打开浏览器。
 - `graphrag`：GraphRAG chat 连接 FalkorDB 服务所需的 host、port、username、password。
 - `chat`：Web Chat 使用的 Chat Completions 模型配置。
 - `summary`：索引阶段生成 Summary 文本的模型配置。
 - `embedding`：摘要向量和查询向量使用的 Embedding 模型配置。
+- `rerank`：GraphRAG 多路向量召回后的候选重排配置。
 
 `chat` 与 `summary` 会读取各自的 `system_prompt`、`temperature`、`max_output_tokens` 等生成参数。`summary.concurrent_requests` 控制索引阶段并发生成 Summary 文本的请求数。`embedding.format` 当前支持 `openai_embeddings`，`embedding.input_mode` 支持 `array` 和 `string`。
+GraphRAG 的 `vector_search_seeds` 工具会在一次调用中接收多条 `query_texts`，每条短句各自召回 `rerank.candidate_limit_per_query` 个 Summary 候选，按目标节点去重后调用 Rerank，并最终返回最多 `rerank.top_n` 个种子节点。

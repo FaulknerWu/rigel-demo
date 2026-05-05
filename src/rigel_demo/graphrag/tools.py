@@ -20,12 +20,6 @@ from rigel_demo.query.service import GraphExpansionDirection, VISIBLE_EDGE_TYPES
 
 RIGEL_ALLOWED_NODE_TYPES = ("Repository", "Module", "File", "Entity", "Anchor", "Summary")
 RIGEL_ALLOWED_RELATIONSHIPS = ("CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES", "HAS_ANCHOR", "DESCRIBES")
-DEFAULT_VECTOR_SEARCH_LIMIT = 5
-MAX_VECTOR_SEARCH_LIMIT = 5
-DEFAULT_EXPAND_LIMIT_PER_NODE = 8
-MAX_EXPAND_LIMIT_PER_NODE = 8
-DEFAULT_RELATION_LIMIT_PER_NODE = 12
-MAX_RELATION_LIMIT_PER_NODE = 12
 MAX_TOTAL_TOOL_CALLS = 6
 TOOL_CALL_LIMITS = {
     "vector_search_seeds": 1,
@@ -55,8 +49,8 @@ def rigel_tools() -> list[Any]:
     from langchain_core.tools import tool
 
     @tool
-    def vector_search_seeds(query_text: str, limit: int = DEFAULT_VECTOR_SEARCH_LIMIT) -> str:
-        """通过 Summary.embedding 向量索引检索最相关的代码图谱种子节点。"""
+    def vector_search_seeds(query_texts: list[str]) -> str:
+        """通过多条检索短句召回 Summary.embedding 候选，并用 Rerank 重排最相关的代码图谱种子节点。"""
 
         return ""
 
@@ -65,7 +59,6 @@ def rigel_tools() -> list[Any]:
         node_ids: list[str],
         direction: Literal["incoming", "outgoing", "both"] = "both",
         edge_types: list[str] | None = None,
-        limit_per_node: int = DEFAULT_EXPAND_LIMIT_PER_NODE,
     ) -> str:
         """对已知节点做受控一跳邻接扩展，可按方向和可见边类型过滤。"""
 
@@ -76,7 +69,6 @@ def rigel_tools() -> list[Any]:
         node_ids: list[str],
         relation_type: str,
         direction: Literal["incoming", "outgoing", "both"] = "both",
-        limit_per_node: int = DEFAULT_RELATION_LIMIT_PER_NODE,
     ) -> str:
         """沿单一可见关系类型查询已知节点的一跳关系。"""
 
@@ -191,7 +183,7 @@ def trace_from_tool_result(
     match tool_name:
         case "vector_search_seeds":
             trace_args: dict[str, object] = {
-                "query_text": string_arg(args, "query_text", default=""),
+                "query_texts": string_list_arg(args, "query_texts"),
                 "items": items,
             }
         case "expand_neighbors":
@@ -254,16 +246,6 @@ def edge_types_arg(value: object, *, default: list[str]) -> tuple[list[str], lis
     ]
     warnings = [f"非法边类型已忽略：{edge_type}" for edge_type in ignored_edge_types]
     return list(dict.fromkeys(normalized_edge_types)), warnings
-
-
-def bounded_limit(value: object, *, default: int, maximum: int, label: str) -> tuple[int, list[str]]:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return default, []
-    if value < 1:
-        return 1, [f"{label} 小于 1，已裁剪为 1"]
-    if value > maximum:
-        return maximum, [f"{label} 超过上限 {maximum}，已裁剪"]
-    return value, []
 
 
 def filter_known_node_ids(
@@ -368,7 +350,6 @@ def expand_graph_query(direction: GraphExpansionDirection) -> str:
     RETURN source.id AS source_id, properties(source) AS source_properties,
            target.id AS target_id, properties(target) AS target_properties,
            type(edge) AS edge_type, properties(edge) AS edge_properties
-    LIMIT $limit
     """
 
 
