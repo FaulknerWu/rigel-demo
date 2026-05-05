@@ -54,6 +54,16 @@ DEFAULT_CONFIG_DOCUMENT = {
         "batch_size": 64,
         "input_mode": "array",
     },
+    "rerank": {
+        "provider": "gitee_ai",
+        "base_url": "",
+        "model": "",
+        "api_key": "your-gitee-ai-token",
+        "timeout_seconds": 60,
+        "top_n": 5,
+        "candidate_limit_per_query": 8,
+        "failover_enabled": False,
+    },
 }
 
 

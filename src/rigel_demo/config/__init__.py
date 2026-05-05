@@ -24,6 +24,7 @@ from rigel_demo.config.llm import (
     LLMConfigSection,
     LLMConfigurationError,
 )
+from rigel_demo.config.rerank import RerankConfig, RerankConfigurationError
 from rigel_demo.config.web import DEFAULT_CONFIG_DOCUMENT, WebConfig, WebConfigurationError
 
 __all__ = [
@@ -39,6 +40,8 @@ __all__ = [
     "LLMConfig",
     "LLMConfigSection",
     "LLMConfigurationError",
+    "RerankConfig",
+    "RerankConfigurationError",
     "RIGEL_CONFIG_FILE_NAME",
     "RIGEL_WORKSPACE_DIRECTORY_NAME",
     "ConfigDocumentErrorMessages",
