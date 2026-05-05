@@ -6,6 +6,7 @@ from typing import Any
 from rigel_demo.config import GraphRAGConfig, LLMConfig, LLMConfigSection, RerankConfig
 from rigel_demo.config.embedding import EmbeddingConfig, EmbeddingFormat, EmbeddingInputMode
 from rigel_demo.graphrag.chat import LangGraphChatService
+from rigel_demo.graphrag.tool_execution import RigelToolExecutor
 from rigel_demo.graphrag.tools import expand_graph_query
 from rigel_demo.rerank import RerankResult
 
@@ -95,6 +96,78 @@ def test_graph_expansion_does_not_use_limit() -> None:
     assert "LIMIT" not in expand_graph_query("both")
 
 
+def test_tool_executor_expands_neighbors_with_existing_relation_format() -> None:
+    graph = FakeGraph(rows_by_embedding={})
+    graph.relation_rows = [
+        {
+            "source_id": "node-a",
+            "source_properties": entity_properties("PaymentService"),
+            "target_id": "node-b",
+            "target_properties": entity_properties("OrderRepository"),
+            "edge_type": "DEPENDS_ON",
+            "edge_properties": edge_properties("edge-a"),
+        }
+    ]
+    executor = RigelToolExecutor(graph=graph, embedding_client=FakeEmbedding(), reranker=FakeReranker([]))
+    known_node_ids = {"node-a"}
+    visited_node_ids: set[str] = set()
+
+    result = executor.expand_neighbors(
+        {"node_ids": ["node-a"], "direction": "both"},
+        known_node_ids=known_node_ids,
+        visited_node_ids=visited_node_ids,
+    )
+
+    assert result["warnings"] == []
+    assert visited_node_ids == {"node-a"}
+    assert known_node_ids == {"node-a", "node-b"}
+    assert result["items"] == [
+        {
+            "tool": "graph_relation",
+            "origin_node_id": "node-a",
+            "direction": "outgoing",
+            "edge": {
+                "id": "edge-a",
+                "source": "node-a",
+                "target": "node-b",
+                "type": "DEPENDS_ON",
+                "properties": edge_properties("edge-a"),
+            },
+            "node": {
+                "id": "node-b",
+                "type": "Entity",
+                "label": "OrderRepository",
+                "properties": entity_properties("OrderRepository"),
+            },
+        }
+    ]
+
+
+def test_tool_executor_query_relation_reuses_graph_relation_format() -> None:
+    graph = FakeGraph(rows_by_embedding={})
+    graph.relation_rows = [
+        [
+            "node-c",
+            entity_properties("ChildService"),
+            "node-a",
+            entity_properties("ParentService"),
+            "SPECIALIZES",
+            edge_properties("edge-b"),
+        ]
+    ]
+    executor = RigelToolExecutor(graph=graph, embedding_client=FakeEmbedding(), reranker=FakeReranker([]))
+
+    result = executor.query_relation(
+        {"node_ids": ["node-a"], "relation_type": "SPECIALIZES", "direction": "incoming"},
+        known_node_ids={"node-a"},
+    )
+
+    assert graph.relation_params[0]["edge_types"] == ["SPECIALIZES"]
+    assert result["items"][0]["tool"] == "graph_relation"
+    assert result["items"][0]["direction"] == "incoming"
+    assert result["items"][0]["node"]["id"] == "node-c"
+
+
 def seed_row(summary_id: str, node_id: str, label: str, summary_text: str, distance: float) -> dict[str, object]:
     return {
         "summary_id": summary_id,
@@ -112,6 +185,22 @@ def seed_row(summary_id: str, node_id: str, label: str, summary_text: str, dista
             "display_name": label,
         },
         "distance": distance,
+    }
+
+
+def entity_properties(display_name: str) -> dict[str, object]:
+    return {
+        "rigel_type": "Entity",
+        "display_name": display_name,
+    }
+
+
+def edge_properties(edge_id: str) -> dict[str, object]:
+    return {
+        "id": edge_id,
+        "rigel_type": "DEPENDS_ON",
+        "source_id": "source",
+        "target_id": "target",
     }
 
 
@@ -176,12 +265,13 @@ class FakeGraph:
         self._rows_by_embedding = rows_by_embedding
         self.vector_limits: list[int] = []
         self.relation_params: list[dict[str, object]] = []
+        self.relation_rows: list[dict[str, object] | list[object]] = []
         self.get_schema = ""
 
     def query(self, query: str, params: dict[str, object]) -> list[dict[str, object]]:
         if "query_embedding" not in params:
             self.relation_params.append(params)
-            return []
+            return self.relation_rows
         self.vector_limits.append(int(params["vector_limit"]))
         return self._rows_by_embedding[tuple(params["query_embedding"])]
 

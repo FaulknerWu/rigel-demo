@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import webbrowser
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -20,6 +21,7 @@ from rigel_demo.config import (
     WebConfigurationError,
     default_config_document_text,
 )
+from rigel_demo.graphrag.tool_execution import build_repository_graph_executor, build_repository_tool_executor
 
 if TYPE_CHECKING:
     from rigel_demo.project.repository_indexer import RepositoryIndexProgress, RepositoryIndexProgressStage
@@ -151,7 +153,7 @@ def index_repository_workspace(
 def _build_parser() -> argparse.ArgumentParser:
     """构建 CLI 参数解析器。"""
 
-    parser = argparse.ArgumentParser(
+    parser = RigelArgumentParser(
         prog="rigel",
         description="Rigel 本地代码图谱工具。",
     )
@@ -183,7 +185,89 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     web_parser.set_defaults(command_handler=_handle_web_command)
 
+    tools_parser = subparsers.add_parser(
+        "tools",
+        help="执行稳定的图谱工具命令。",
+        description="以纯 JSON 形式输出 Rigel 图谱工具结果，供 Agent 稳定调用。",
+    )
+    tools_subparsers = tools_parser.add_subparsers(dest="tools_command_name", required=True)
+
+    vector_parser = tools_subparsers.add_parser(
+        "vector-search-seeds",
+        help="按自然语言查询召回图谱种子节点。",
+        description="读取当前仓库配置并对一个或多个查询执行向量召回与重排。",
+    )
+    vector_parser.add_argument(
+        "--query",
+        action="append",
+        dest="queries",
+        required=True,
+        type=_non_empty_cli_text,
+        help="自然语言查询文本，可重复指定。",
+    )
+    vector_parser.set_defaults(command_handler=_handle_vector_search_seeds_command)
+
+    expand_parser = tools_subparsers.add_parser(
+        "expand-neighbors",
+        help="按节点 ID 读取一跳邻接关系。",
+        description="读取当前仓库图数据库并展开指定节点的一跳邻接关系。",
+    )
+    expand_parser.add_argument(
+        "--node-id",
+        action="append",
+        dest="node_ids",
+        required=True,
+        type=_non_empty_cli_text,
+        help="目标节点 ID，可重复指定。",
+    )
+    expand_parser.add_argument(
+        "--direction",
+        default="both",
+        help="关系方向，默认 both。",
+    )
+    expand_parser.add_argument(
+        "--edge-type",
+        action="append",
+        dest="edge_types",
+        default=None,
+        help="限制边类型，可重复指定，默认四类可视关系。",
+    )
+    expand_parser.set_defaults(command_handler=_handle_expand_neighbors_command)
+
+    relation_parser = tools_subparsers.add_parser(
+        "query-relation",
+        help="按单一关系类型精确查询邻接关系。",
+        description="读取当前仓库图数据库并查询指定节点的单一关系类型。",
+    )
+    relation_parser.add_argument(
+        "--node-id",
+        action="append",
+        dest="node_ids",
+        required=True,
+        type=_non_empty_cli_text,
+        help="目标节点 ID，可重复指定。",
+    )
+    relation_parser.add_argument(
+        "--relation-type",
+        required=True,
+        help="关系类型，仅支持四类可视关系。",
+    )
+    relation_parser.add_argument(
+        "--direction",
+        default="both",
+        help="关系方向，默认 both。",
+    )
+    relation_parser.set_defaults(command_handler=_handle_query_relation_command)
+
     return parser
+
+
+class RigelArgumentParser(argparse.ArgumentParser):
+    """把 argparse 的运行错误固定输出到 stderr。"""
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(2, f"参数错误：{message}\n")
 
 
 def _handle_init_command(_args: argparse.Namespace) -> int:
@@ -430,6 +514,73 @@ def _handle_web_command(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_vector_search_seeds_command(args: argparse.Namespace) -> int:
+    workspace_paths = WorkspacePaths.from_repository()
+    try:
+        _ensure_workspace_config_exists(workspace_paths)
+        _ensure_workspace_database_exists(workspace_paths)
+        with build_repository_tool_executor(
+            repository_path=workspace_paths.repository_path,
+            graph_name=DEFAULT_GRAPH_NAME,
+            database_path=workspace_paths.database_path,
+        ) as tool_executor:
+            result = tool_executor.executor.vector_search_seeds({"query_texts": list(args.queries)})
+    except (FileNotFoundError, RuntimeError, ValueError) as error:
+        _print_cli_error(str(error))
+        return 1
+    _print_tool_json(result, tool_name="vector_search_seeds")
+    return 0
+
+
+def _handle_expand_neighbors_command(args: argparse.Namespace) -> int:
+    workspace_paths = WorkspacePaths.from_repository()
+    try:
+        _validate_direction(args.direction)
+        if args.edge_types is not None:
+            _validate_edge_types(args.edge_types, option_name="--edge-type")
+        _ensure_workspace_config_exists(workspace_paths)
+        _ensure_workspace_database_exists(workspace_paths)
+        tool_args: dict[str, object] = {"node_ids": list(args.node_ids), "direction": args.direction}
+        if args.edge_types is not None:
+            tool_args["edge_types"] = list(args.edge_types)
+        with build_repository_graph_executor(
+            repository_path=workspace_paths.repository_path,
+            graph_name=DEFAULT_GRAPH_NAME,
+            database_path=workspace_paths.database_path,
+        ) as tool_executor:
+            result = tool_executor.executor.expand_neighbors(tool_args)
+    except (FileNotFoundError, RuntimeError, ValueError) as error:
+        _print_cli_error(str(error))
+        return 1
+    _print_tool_json(result, tool_name="expand_neighbors")
+    return 0
+
+
+def _handle_query_relation_command(args: argparse.Namespace) -> int:
+    workspace_paths = WorkspacePaths.from_repository()
+    try:
+        _validate_direction(args.direction)
+        _validate_edge_types([args.relation_type], option_name="--relation-type")
+        _ensure_workspace_config_exists(workspace_paths)
+        _ensure_workspace_database_exists(workspace_paths)
+        tool_args: dict[str, object] = {
+            "node_ids": list(args.node_ids),
+            "relation_type": args.relation_type,
+            "direction": args.direction,
+        }
+        with build_repository_graph_executor(
+            repository_path=workspace_paths.repository_path,
+            graph_name=DEFAULT_GRAPH_NAME,
+            database_path=workspace_paths.database_path,
+        ) as tool_executor:
+            result = tool_executor.executor.query_relation(tool_args)
+    except (FileNotFoundError, RuntimeError, ValueError) as error:
+        _print_cli_error(str(error))
+        return 1
+    _print_tool_json(result, tool_name="query_relation")
+    return 0
+
+
 def _write_default_config_if_missing(config_path: Path) -> bool:
     """只在缺失时写入默认配置，避免覆盖用户已填写的密钥与模型。"""
 
@@ -488,6 +639,44 @@ def database_artifact_exists(database_path: Path) -> bool:
     """判断 FalkorDBLite 是否已为指定数据库路径生成运行时产物。"""
 
     return database_path.exists() or database_path.with_name(f"{database_path.name}.settings").exists()
+
+
+def _ensure_workspace_database_exists(workspace_paths: WorkspacePaths) -> None:
+    if not database_artifact_exists(workspace_paths.database_path):
+        raise FileNotFoundError(f"未找到图数据库，请先执行 rigel index：{workspace_paths.database_path}")
+
+
+def _print_tool_json(result: dict[str, object], *, tool_name: str) -> None:
+    payload = {
+        "status": "success",
+        "tool": tool_name,
+        "items": result.get("items", []),
+        "warnings": result.get("warnings", []),
+    }
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _print_cli_error(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def _non_empty_cli_text(value: str) -> str:
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise argparse.ArgumentTypeError("不能为空")
+    return normalized_value
+
+
+def _validate_direction(direction: str) -> None:
+    if direction not in {"incoming", "outgoing", "both"}:
+        raise ValueError(f"非法方向：{direction}，仅支持 incoming、outgoing、both")
+
+
+def _validate_edge_types(edge_types: list[str], *, option_name: str) -> None:
+    allowed_edge_types = {"CONTAINS", "DEPENDS_ON", "SPECIALIZES", "ALIASES"}
+    invalid_edge_types = [edge_type for edge_type in edge_types if edge_type not in allowed_edge_types]
+    if invalid_edge_types:
+        raise ValueError(f"{option_name} 仅支持 CONTAINS、DEPENDS_ON、SPECIALIZES、ALIASES：{', '.join(invalid_edge_types)}")
 
 
 def _remove_database_artifacts(database_path: Path) -> None:
